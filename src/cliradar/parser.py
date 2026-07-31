@@ -36,8 +36,10 @@ OPTION_RE = re.compile(
 )
 # An option the device listed without a description. Restricted to something
 # shaped like a CLI token so a wrapped description ending on a lone word is not
-# mistaken for one; a trailing `.` or `,` is prose, not a command.
-TOKEN_ONLY_RE = re.compile(r"^\s+(?P<token>[A-Za-z0-9][\w.:/<>\[\]{}|-]*)\s*$")
+# mistaken for one; a trailing `.` or `,` is prose, not a command. A leading
+# `<` is a placeholder, not prose: on the reference platform `<1-100>` appears
+# alone on its line wherever a numeric parameter has no description.
+TOKEN_ONLY_RE = re.compile(r"^\s+(?P<token>[A-Za-z0-9<][\w.:/<>\[\]{}|-]*)\s*$")
 CR_ONLY_RE = re.compile(
     r"^\s+(?P<token><cr>|<return>|<enter>|<\[enter\]>|\[enter\])\s*$",
     re.IGNORECASE,

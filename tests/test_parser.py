@@ -167,3 +167,37 @@ def test_strict_default_does_not_invent_a_command_from_a_status_line() -> None:
         "Initializing",
         "Incomplete",
     ]
+
+
+def test_undescribed_numeric_range_is_an_option_in_the_permissive_profile() -> None:
+    # Measured on the reference platform: `netconf log-per-size ?` answers with
+    # `  <1-100>` alone on its line - a placeholder with no description. The
+    # last three parser losses in the 18201-answer replay were this shape.
+    output = """
+                netconf log-per-size 
+
+  <1-100>
+
+SW1(config)#netconf log-per-size 
+"""
+    options = parse_context_help(output, "netconf log-per-size ", PERMISSIVE)
+    assert [(item.token, item.kind) for item in options] == [("<1-100>", "parameter")]
+
+    # The strict profile still refuses a bare token: on other platforms an
+    # indented lone word is a status line, not an option.
+    assert parse_context_help(output, "netconf log-per-size ") == []
+
+
+def test_redrawn_query_echo_is_not_an_option() -> None:
+    # After answering `?` the platform redraws the typed text indented, which
+    # makes it look exactly like an undescribed option. The replay showed 87
+    # such echoes; every one must be dropped even in the permissive profile.
+    output = """
+      cls 
+
+  <cr>  
+
+SW1#cls 
+"""
+    options = parse_context_help(output, "cls ", PERMISSIVE)
+    assert [item.token for item in options] == ["<cr>"]
