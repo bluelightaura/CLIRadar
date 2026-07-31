@@ -29,6 +29,16 @@ DEFAULT_PROBE_DENYLIST: frozenset[str] = frozenset(
         "reboot", "reload", "restart", "halt", "shutdown", "poweroff",
         "erase", "format", "delete", "clear", "write", "copy", "save",
         "restore", "upgrade", "update", "boot", "install",
+        # The same acts under other vendors' verbs. `reset` is the dangerous
+        # one here: on a VRP-like CLI it is what `clear` is elsewhere, and
+        # `reset saved-configuration` wipes the box. `commit`/`rollback`
+        # apply or revert a candidate configuration wholesale, and `request`
+        # is the Junos verb that carries reboot and zeroise.
+        "reset", "commit", "rollback", "request", "startup", "schedule",
+        "backup", "activate", "deactivate", "apply", "revert", "zeroize",
+        "zeroise", "renew", "refresh", "kill", "terminate", "disconnect",
+        "free", "fixdisk", "mkdir", "rmdir", "rename", "move", "undelete",
+        "patch", "load", "execute", "test",
         "logout", "exit", "quit", "end", "disable",
         "ping", "traceroute", "tracert", "telnet", "ssh", "monitor", "debug",
         "terminal", "screen-length", "more", "language",
@@ -261,15 +271,23 @@ class ModeNavigator:
 
 
 def is_probe_allowed(command: str, denylist: frozenset[str] = DEFAULT_PROBE_DENYLIST) -> bool:
-    """Whether a command may be executed to find out if it opens a context."""
+    """Whether a command may be executed to find out if it opens a context.
+
+    Every word is checked, not just the first. The destructive verb is often
+    not the head: `reset saved-configuration` erases the box, `request system
+    reboot` restarts it, and `schedule reboot` does it later - all three pass a
+    head-only test because their first word describes nothing dangerous. A
+    context opener is a short phrase of nouns, so refusing a phrase that
+    mentions a denied verb anywhere costs coverage that was never there, while
+    a single miss costs the device.
+    """
     tokens = command.split()
     if not tokens:
         return False
-    head = tokens[0].lower()
-    if head in {"no", "undo", "default"}:
-        head = tokens[1].lower() if len(tokens) > 1 else head
+    # A negation undoes existing configuration whatever follows it.
+    if tokens[0].lower() in {"no", "undo", "default"}:
         return False
-    return head not in denylist
+    return not any(token.lower() in denylist for token in tokens)
 
 
 def probe_order(commands: Sequence[str], hints: Sequence[str]) -> list[str]:
