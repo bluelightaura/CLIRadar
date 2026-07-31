@@ -400,3 +400,37 @@ def test_parallel_crawl_propagates_worker_errors() -> None:
             CrawlLimits(max_depth=5, max_queries=20),
             extra_query_helps=[broken],
         )
+
+
+def test_negation_mirror_is_crawled_last() -> None:
+    # The `no`/`undo` branch mirrors the whole tree without describing any new
+    # capability, so a scan cut short by a limit loses the mirror rather than
+    # the commands. Ordinary branches must all be asked before the first
+    # negation prefix is.
+    answers = {
+        "": (
+            "  show  Display\n  vlan  VLAN\n  no  Negate a command\n"
+            "  undo  Undo a command\n  <cr>\n"
+        ),
+        "show ": "  version  Version\n  <cr>\n",
+        "vlan ": "  <cr>\n",
+        "show version ": "  <cr>\n",
+        "no ": "  vlan  VLAN\n  <cr>\n",
+        "no vlan ": "  <cr>\n",
+        "undo ": "  <cr>\n",
+    }
+    order: list[str] = []
+
+    def query_help(prefix: str) -> str:
+        order.append(prefix)
+        return answers.get(prefix, "  <cr>\n")
+
+    catalog = Catalog(device={}, mode="audit")
+    result = crawl(query_help, catalog, [], CrawlLimits(max_depth=6, max_queries=100))
+
+    assert result.complete
+    first_negation = min(order.index("no "), order.index("undo "))
+    ordinary = [prefix for prefix in order if not prefix.startswith(("no", "undo"))]
+    assert all(order.index(prefix) < first_negation for prefix in ordinary)
+    # The mirror is still fully crawled - deferred, never dropped.
+    assert "no vlan" in catalog.commands

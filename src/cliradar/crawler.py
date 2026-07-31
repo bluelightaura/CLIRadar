@@ -17,6 +17,10 @@ from .parser import (
 )
 
 NUMERIC_RANGE_RE = re.compile(r"^<(?P<minimum>-?\d+)(?:-|\.\.)(?P<maximum>-?\d+)>$")
+# Negation branches mirror the whole tree and describe removal rather than
+# capability, so they are walked last: a scan cut short by a limit or a dead
+# session then loses the mirror, not the commands themselves.
+LATE_TOKENS: frozenset[str] = frozenset({"no", "undo", "default"})
 # Nested derivations resolve within a few passes; the bound stops a pathological
 # grammar from looping.
 MAX_REPLICATION_PASSES = 8
@@ -158,6 +162,7 @@ def _ingest_options(
     queue: deque[_CrawlNode],
     limits: CrawlLimits,
     skipped_parameters: set[str],
+    late_queue: deque[_CrawlNode] | None = None,
 ) -> int:
     skipped_denied = 0
     parent_command = node.catalog_prefix.strip()
@@ -207,12 +212,16 @@ def _ingest_options(
                 continue
             query_token = sample
 
-        queue.append(
-            _CrawlNode(
-                catalog_prefix=command + " ",
-                query_prefix=f"{node.query_prefix}{query_token} ",
-            )
+        child = _CrawlNode(
+            catalog_prefix=command + " ",
+            query_prefix=f"{node.query_prefix}{query_token} ",
         )
+        # Only a top-level negation is deferred: `no` inside a branch is that
+        # branch's own grammar, and holding it back would reorder one node.
+        if late_queue is not None and not node.catalog_prefix and token.lower() in LATE_TOKENS:
+            late_queue.append(child)
+        else:
+            queue.append(child)
     return skipped_denied
 
 
@@ -367,6 +376,7 @@ def crawl(
     if include_root:
         queue.append(_CrawlNode("", ""))
     deferred_seeds: deque[_CrawlNode] = deque()
+    late: deque[_CrawlNode] = deque()
     skipped_parameters: set[str] = set()
     _load_seeds(seeds, verify_seeds, limits, deferred_seeds, skipped_parameters)
     if not include_root:
@@ -381,10 +391,15 @@ def crawl(
     skipped_denied = 0
     cancelled = False
 
-    while (queue or deferred_seeds) and queries < limits.max_queries:
+    while (queue or deferred_seeds or late) and queries < limits.max_queries:
         if not queue:
+            # Ordinary branches first, then the seeds, and the negation mirror
+            # last - the pass order a person would choose by hand.
             queue.extend(deferred_seeds)
             deferred_seeds.clear()
+            if not queue:
+                queue.extend(late)
+                late.clear()
         if is_cancelled and is_cancelled():
             cancelled = True
             break
@@ -426,11 +441,12 @@ def crawl(
                     queue,
                     limits,
                     skipped_parameters,
+                    late_queue=late,
                 )
                 continue
 
         skipped_denied += _ingest_options(
-            node, options, catalog, queue, limits, skipped_parameters
+            node, options, catalog, queue, limits, skipped_parameters, late_queue=late
         )
         if on_progress:
             on_progress(
@@ -439,7 +455,7 @@ def crawl(
                     max_queries=limits.max_queries,
                     prefix=node.catalog_prefix,
                     commands=len(catalog.commands),
-                    pending=len(queue) + len(deferred_seeds),
+                    pending=len(queue) + len(deferred_seeds) + len(late),
                 )
             )
     _, derived_truncated = _replicate(
@@ -458,7 +474,7 @@ def crawl(
     )
     queries += derived_verified
 
-    pending_nodes = len(queue) + len(deferred_seeds)
+    pending_nodes = len(queue) + len(deferred_seeds) + len(late)
     query_limit_reached = queries >= limits.max_queries and pending_nodes > 0
     complete = not (
         query_limit_reached
@@ -500,6 +516,7 @@ def _crawl_parallel(
     if include_root:
         queue.append(_CrawlNode("", ""))
     deferred_seeds: deque[_CrawlNode] = deque()
+    late: deque[_CrawlNode] = deque()
     skipped_parameters: set[str] = set()
     _load_seeds(seeds, verify_seeds, limits, deferred_seeds, skipped_parameters)
     if not include_root:
@@ -518,14 +535,18 @@ def _crawl_parallel(
     errors: list[BaseException] = []
 
     def next_node() -> _CrawlNode | None:
-        # Deferred seeds start only once the main tree is fully drained,
-        # matching the sequential traversal order.
-        while queue or deferred_seeds:
+        # Deferred seeds start only once the main tree is fully drained, and
+        # the negation mirror only after those, matching the sequential order.
+        while queue or deferred_seeds or late:
             if not queue:
                 if state["in_flight"]:
                     return None
-                queue.extend(deferred_seeds)
-                deferred_seeds.clear()
+                if deferred_seeds:
+                    queue.extend(deferred_seeds)
+                    deferred_seeds.clear()
+                else:
+                    queue.extend(late)
+                    late.clear()
                 continue
             node = queue.popleft()
             visit_key = (node.catalog_prefix, node.query_prefix)
@@ -576,7 +597,8 @@ def _crawl_parallel(
                 state["queries"] += 1
                 state["in_flight"] -= 1
                 state["skipped_denied"] += _ingest_options(
-                    node, options, catalog, queue, limits, skipped_parameters
+                    node, options, catalog, queue, limits, skipped_parameters,
+                    late_queue=late,
                 )
                 if on_progress:
                     on_progress(
@@ -585,7 +607,7 @@ def _crawl_parallel(
                             max_queries=limits.max_queries,
                             prefix=node.catalog_prefix,
                             commands=len(catalog.commands),
-                            pending=len(queue) + len(deferred_seeds),
+                            pending=len(queue) + len(deferred_seeds) + len(late),
                         )
                     )
                 condition.notify_all()
@@ -601,7 +623,7 @@ def _crawl_parallel(
     if errors:
         raise errors[0]
 
-    pending_nodes = len(queue) + len(deferred_seeds)
+    pending_nodes = len(queue) + len(deferred_seeds) + len(late)
     query_limit_reached = state["queries"] >= limits.max_queries and pending_nodes > 0
     complete = not (
         query_limit_reached
