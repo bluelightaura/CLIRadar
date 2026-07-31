@@ -7,6 +7,69 @@ Semantic Versioning.
 
 ### Added
 
+- The device's running configuration is read and matched against the crawled
+  catalog (`discovery.config_commands`, default `display current-configuration`
+  then `show running-config`; written to `output.config_tree`). This closes the
+  loop between the two halves of the scanner: the crawl says what the box *can*
+  be told to do, the configuration says what it *has* been told, and a
+  configured line the catalog does not contain is the one piece of evidence
+  that a command surface is incomplete without a second device to compare
+  against. The dump is parsed structurally - indentation and section separators
+  rebuild the view hierarchy - so a platform this code has never seen still
+  yields a tree; each line is then looked up under every view path the crawl
+  actually stood in, and folded instance numbers let `interface 10GE1/0/24`
+  match a catalog walked through `10GE1/0/1`. The catalog carries only the
+  shape of each finding (`configuration.missing_from_catalog`, values folded
+  away); the full parsed tree keeps the real values and is written to a
+  separate private file, because it describes one network rather than a
+  platform. Passwords, keys and community strings are blanked before either is
+  written. Reading it is one read-only command with its own `capture_timeout`,
+  run before the crawl so a session that dies later still leaves it behind.
+- `discovery.parser_profile` exposes the two vendor-deviation flags the crawler
+  already had (`accept_undescribed_options`, `error_words_are_commands`) to the
+  configuration file, so a platform that names commands with words like
+  `error-down` or lists options without descriptions can be read correctly
+  without editing code. Both stay off by default - each trades a class of
+  missed commands for a class of invented ones.
+
+### Changed
+
+- The crawl walks in passes ordered by usefulness: ordinary branches first,
+  seed commands next, and the `no`/`undo`/`default` mirror last. The negation
+  branch duplicates the whole tree while describing removal rather than
+  capability, so a scan cut short by a query limit or a dead session now loses
+  the mirror instead of the commands themselves. Nothing is dropped - the
+  mirror is still crawled to completion when the scan runs its course.
+- Context-opening probes no longer type a value the operator did not supply
+  (`discovery.probe_invented_values`, default false). Filling a numeric range
+  with its minimum reads as innocent and is not: inside an interface view it
+  turns `speed <10-40000>` into `speed 10` and `mtu <68-9216>` into `mtu 68` on
+  a live port. Candidates left untried for want of a sample are counted in
+  `probes_unsampled` with the parameters that would unlock them, so the cost is
+  reported rather than paid silently. Set the flag only against a lab device.
+
+### Fixed
+
+- The permissive parser profile now reads an undescribed numeric range
+  (`  <1-100>` alone on its line) as the parameter it is. A replay of the full
+  reference log - 18201 device answers, 82306 options - against the fixed
+  parser shows zero lost and zero invented options; the last three losses were
+  all this shape, and the 87 remaining "losses" a naive reading reports are
+  the device redrawing the typed text, which must be dropped and is.
+- The HTML report gained a "configuration versus catalog" section: coverage,
+  and the configured-but-never-crawled lines with their values folded away.
+- The probe safety check reads the whole command, not just its first word. A
+  denied verb is often not the head - `reset saved-configuration` erases the
+  box, `request system reboot` restarts it, `schedule reboot` does it later -
+  and a head-only test let all three through. The denylist also gained the
+  verbs those examples use (`reset`, `commit`, `rollback`, `request`, and more).
+- Confirmation dialogs are recognised in every form the platform writes them,
+  not just `(y/n)`. VRP also asks `[Y/N]`, `(y or n)`, `[yes,no] (no)` and a
+  bare `Continue?`; a form the pattern missed left the device reading a yes/no
+  while the scan typed its next command into the open dialog.
+
+### Added (earlier in this cycle)
+
 - Firmware stamp in every catalog and at the top of the HTML report
   (`discovery.version_commands`, default `show version`). A command surface only
   means something next to the software that exposed it: without the stamp two
