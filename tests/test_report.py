@@ -193,3 +193,43 @@ def test_report_without_a_firmware_stamp_omits_the_section() -> None:
     )
 
     assert "Версия ПО устройства" not in render_html_report(catalog)
+
+
+def test_report_shows_configuration_coverage_and_catalog_gaps() -> None:
+    catalog = Catalog(
+        device={"identity": "redacted"},
+        mode="compare",
+        scan={"complete": True, "queries": 3},
+    )
+    catalog.add("interface IFNAME", "", "cli")
+    catalog.add("interface IFNAME", "", "documentation:commands.txt")
+    catalog.configuration = {
+        "source_command": "display current-configuration",
+        "lines": 12,
+        "matched": 10,
+        "matched_elsewhere": 0,
+        "unmatched": 2,
+        "free_text": 0,
+        "coverage": 0.8333,
+        "missing_from_catalog": [
+            {"command": "interface <value> sflow sampling-rate <value>", "occurrences": 2},
+        ],
+    }
+
+    report = render_html_report(catalog)
+
+    assert "Конфигурация против каталога" in report
+    assert "sflow sampling-rate" in report
+    assert "83.3%" in report
+    # The gap table folds values away; a raw configured value never appears.
+    assert "4096" not in report
+
+
+def test_report_without_configuration_omits_the_section() -> None:
+    catalog = Catalog(
+        device={"identity": "redacted"},
+        mode="compare",
+        scan={"complete": True, "queries": 1},
+    )
+    report = render_html_report(catalog)
+    assert "Конфигурация против каталога" not in report

@@ -7,7 +7,7 @@ import stat
 import sys
 import time
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from enum import IntEnum
 from pathlib import Path
 
@@ -137,6 +137,31 @@ def capture_firmware(session: object, commands: tuple[str, ...]) -> dict[str, ob
     return {"captured_at_start": True, "results": captured}
 
 
+def capture_running_config(session: object, commands: tuple[str, ...]) -> tuple[str, str]:
+    """Read the running configuration, trying each dialect in turn.
+
+    Vendors disagree on the verb and a wrong guess is answered with an error
+    rather than a configuration, so the first answer that looks like one wins.
+    Failure is never fatal: a command surface without the configuration beside
+    it is still the thing the operator asked for.
+    """
+    from .parser import ERROR_RE, clean_terminal_output
+
+    for command in commands:
+        try:
+            output = session.capture_output(command)  # type: ignore[attr-defined]
+        # A refused dialect is not a failure; the next one is tried.
+        except Exception:  # noqa: BLE001, S112  # nosec B112
+            continue
+        body = clean_terminal_output(output)
+        lines = [line.strip() for line in body.splitlines() if line.strip()]
+        # A rejected command answers in one or two lines, all of them errors.
+        meaningful = [line for line in lines if not ERROR_RE.match(line)]
+        if len(meaningful) > 3:
+            return command, output
+    return "", ""
+
+
 def merge_context_scan(catalog: Catalog, scan: object) -> None:
     """Fold one context's commands into the shared catalog.
 
@@ -153,13 +178,66 @@ def merge_context_scan(catalog: Catalog, scan: object) -> None:
         catalog.enumerated.add(f"{prefix} {node}".strip())
 
 
+@dataclass(frozen=True)
+class ScanOutcome:
+    """What one run produced, for the caller that has to report it."""
+
+    catalog_path: Path
+    html_path: Path | None
+    commands: int
+    queries: int
+    complete: bool
+    config_path: Path | None = None
+    config_summary: dict[str, object] | None = None
+
+
+def _view_prefixes(mode_report: object) -> tuple[tuple[str, ...], ...]:
+    """The entry paths of every context the scan actually stood in.
+
+    A configured line lives inside a view, and the catalog stores each command
+    under the path the scan walked to reach it. Matching the two therefore
+    needs the list of those paths - and it has to come from the scan, because
+    inventing it would mean naming this platform's modes in code.
+    """
+    if mode_report is None:
+        return ()
+    paths: list[tuple[str, ...]] = []
+    for scan in getattr(mode_report, "scans", []):
+        entry_path = tuple(scan.context.entry_path)
+        if entry_path and entry_path not in paths:
+            paths.append(entry_path)
+    # Shortest first: a line should match under the outermost view that
+    # explains it rather than an accidental deeper namesake.
+    return tuple(sorted(paths, key=len))
+
+
+def apply_config_scan(
+    catalog: Catalog,
+    config: AppConfig,
+    command: str,
+    output: str,
+    view_prefixes: tuple[tuple[str, ...], ...] = (),
+) -> None:
+    """Match the running configuration against the catalog and save both."""
+    from .runconfig import correlate, parse_config, redact_secrets, render_config_yaml
+
+    lines = parse_config(redact_secrets(output), command)
+    coverage = correlate(lines, catalog, command=command, view_prefixes=view_prefixes)
+    catalog.configuration = coverage.to_dict()
+    _write_private_text(
+        config.output.config_tree,
+        render_config_yaml(lines, coverage),
+        "a configuration tree",
+    )
+
+
 def build_catalog(
     config: AppConfig,
     mode: str,
     docs_path: Path,
     on_progress: Callable[[CrawlProgress], None] | None = None,
     on_context: Callable[[object], None] | None = None,
-) -> tuple[Path, Path | None, int, int, bool]:
+) -> ScanOutcome:
     if mode not in {"compare", "audit", "docs"}:
         raise ConfigurationError("mode must be 'compare', 'audit', or 'docs'")
     if mode in {"compare", "docs"} and not docs_path.exists():
@@ -179,7 +257,7 @@ def build_catalog(
         }
         write_catalog(catalog, destination)
         write_exports(catalog, config)
-        return destination, None, len(catalog.commands), 0, True
+        return ScanOutcome(destination, None, len(catalog.commands), 0, True)
 
     import paramiko
 
@@ -188,7 +266,13 @@ def build_catalog(
 
     session_factory = TelnetSession if config.device.transport == "telnet" else SwitchSession
 
+    from .parser import ParserProfile
+
     limits = CrawlLimits(
+        parser_profile=ParserProfile(
+            accept_undescribed_options=config.discovery.accept_undescribed_options,
+            error_words_are_commands=config.discovery.error_words_are_commands,
+        ),
         max_depth=config.discovery.max_depth,
         max_queries=config.discovery.max_queries,
         denied_tokens=frozenset(config.discovery.denied_tokens),
@@ -200,11 +284,19 @@ def build_catalog(
     seeds = list(config.discovery.seed_commands)
     verify_seeds = list(documented) if mode == "compare" else []
     mode_report = None
+    config_command, config_output = "", ""
     try:
         with session_factory(config.device.to_session_dict(), config.output.raw_log) as session:
             if config.discovery.version_commands:
                 catalog.device["firmware"] = capture_firmware(
                     session, config.discovery.version_commands
+                )
+            if config.discovery.config_commands:
+                # Read before the crawl: it is one read-only command, and a
+                # session that dies later still leaves the configuration behind
+                # to be matched against whatever the crawl managed to collect.
+                config_command, config_output = capture_running_config(
+                    session, config.discovery.config_commands
                 )
             if config.discovery.enter_modes:
                 from .modes import scan_modes
@@ -251,6 +343,7 @@ def build_catalog(
                     device=catalog.device,
                     max_contexts=config.discovery.max_contexts,
                     max_probes_per_context=config.discovery.max_probes_per_context,
+                    probe_invented_values=config.discovery.probe_invented_values,
                     workers=workers,
                     on_progress=on_progress,
                     on_context=persist,
@@ -274,6 +367,13 @@ def build_catalog(
                 )
     except (OSError, TimeoutError, RuntimeError, ValueError, paramiko.SSHException) as error:
         raise DeviceConnectionError(f"device session failed: {error}") from error
+
+    written_config: Path | None = None
+    if config_output:
+        apply_config_scan(
+            catalog, config, config_command, config_output, _view_prefixes(mode_report)
+        )
+        written_config = config.output.config_tree
 
     if mode_report is not None:
         if on_progress:
@@ -300,7 +400,15 @@ def build_catalog(
         html_destination = config.output.html_report if mode == "compare" else None
         if html_destination is not None:
             write_html_report(catalog, html_destination)
-        return destination, html_destination, len(catalog.commands), queries, complete
+        return ScanOutcome(
+            destination,
+            html_destination,
+            len(catalog.commands),
+            queries,
+            complete,
+            config_path=written_config,
+            config_summary=catalog.configuration or None,
+        )
 
     catalog.scan = crawl_result.to_dict()
     write_catalog(catalog, destination)
@@ -308,12 +416,14 @@ def build_catalog(
     html_destination = config.output.html_report if mode == "compare" else None
     if html_destination is not None:
         write_html_report(catalog, html_destination)
-    return (
+    return ScanOutcome(
         destination,
         html_destination,
         len(catalog.commands),
         crawl_result.queries,
         crawl_result.complete,
+        config_path=written_config,
+        config_summary=catalog.configuration or None,
     )
 
 
@@ -438,7 +548,7 @@ def run(argv: list[str] | None = None) -> int:
             if not args.quiet:
                 print(f"Configuration is valid: {args.config}")
             return ExitCode.OK
-        destination, html_destination, commands, queries, complete = build_catalog(
+        outcome = build_catalog(
             config,
             args.mode,
             args.docs,
@@ -462,14 +572,31 @@ def run(argv: list[str] | None = None) -> int:
             print(file=sys.stderr)
     if not args.quiet:
         if args.mode == "docs":
-            print(f"Wrote {commands} documentation commands to {destination}")
+            print(f"Wrote {outcome.commands} documentation commands to {outcome.catalog_path}")
         else:
-            print(f"Wrote {commands} commands to {destination} ({queries} CLI queries)")
-        if html_destination is not None:
-            print(f"Wrote HTML report to {html_destination}")
+            print(
+                f"Wrote {outcome.commands} commands to {outcome.catalog_path}"
+                f" ({outcome.queries} CLI queries)"
+            )
+        if outcome.html_path is not None:
+            print(f"Wrote HTML report to {outcome.html_path}")
         print(f"Wrote command tree to {config.output.tree_catalog}")
         print(f"Wrote human-readable commands to {config.output.human_catalog}")
-    if not complete:
+        if outcome.config_path is not None and outcome.config_summary:
+            summary = outcome.config_summary
+            print(
+                f"Wrote parsed running configuration to {outcome.config_path}"
+                f" ({summary['lines']} lines, {float(summary['coverage']):.1%}"
+                " explained by the catalog)"
+            )
+            missing = int(summary["unmatched"])
+            if missing:
+                print(
+                    f"warning: {missing} configured lines are not in the catalog;"
+                    " see 'configuration.missing_from_catalog'",
+                    file=sys.stderr,
+                )
+    if not outcome.complete:
         print(
             "warning: scan is incomplete; inspect the 'scan' section in the catalog",
             file=sys.stderr,

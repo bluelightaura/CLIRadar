@@ -19,10 +19,15 @@ PAGER_RE = re.compile(
     re.IGNORECASE,
 )
 # A device that asks for confirmation keeps reading the line: everything typed
-# next would answer the dialog instead of running as a command.
+# next would answer the dialog instead of running as a command. The forms vary
+# more than one pattern first suggests - VRP writes "[Y/N]", "(y/n)", "(y or
+# n)", "[yes,no] (no)" and a bare "Continue?", and an unmatched dialog swallows
+# every later keystroke, so the net is drawn wide on purpose.
 CONFIRM_RE = re.compile(
-    r"\(y/n\)|\[y/n\]|\(yes/no\)|\[confirm\]|\bconfirm\b|continue\s*\?|"
-    r"are\s+you\s+sure",
+    r"\(\s*y\s*/\s*n\s*\)|\[\s*y\s*/\s*n\s*\]|\(\s*yes\s*/\s*no\s*\)|"
+    r"\[\s*yes\s*/\s*no\s*\]|\(\s*y\s+or\s+n\s*\)|\[\s*yes\s*,\s*no\s*\]|"
+    r"\[confirm\]|\bconfirm\b|continue\s*\?|proceed\s*\?|are\s+you\s+sure|"
+    r"press\s+.*to\s+(?:confirm|continue)",
     re.IGNORECASE,
 )
 
@@ -145,6 +150,55 @@ class SwitchSession:
             self.channel.send("n\r")
             output += self._read_until_idle()
         self._log(f"\n### RUN {command}\n{output}")
+        return output
+
+    def capture_output(self, command: str) -> str:
+        """Run a read-only command and collect everything it prints.
+
+        `run_command` stops at the first redrawn prompt, which is right for a
+        one-line answer and wrong for a configuration dump: a dump is large
+        enough to arrive in many chunks, it pauses while the device formats the
+        next page, and it contains lines that end in '#' - the very character
+        the redraw marker looks for. So the end of a capture is the configured
+        prompt pattern standing alone on the last line with nothing more
+        arriving, and a device that never gets there yields what it did send
+        instead of an exception; a truncated configuration still names commands.
+        """
+        if not self.channel:
+            raise RuntimeError("SSH session is not connected")
+        self._validate_prefix(command)
+        self.channel.send("\x15")
+        self._read_available()
+        self.channel.send(command + "\r")
+        pattern = re.compile(self.config.get("prompt_pattern", r"(?m)^[^\r\n]+[>#]\s*$"))
+        deadline = time.monotonic() + float(self.config.get("capture_timeout", 120))
+        settle = max(float(self.config.get("idle_timeout", 0.35)), 0.5)
+        last_data = time.monotonic()
+        output = ""
+        handled_pagers = 0
+        while time.monotonic() < deadline:
+            chunk = self._read_available()
+            if chunk:
+                output += chunk
+                self._check_response_size(output)
+                last_data = time.monotonic()
+                pager_count = len(PAGER_RE.findall(output))
+                while self.channel and handled_pagers < pager_count:
+                    self.channel.send(" ")
+                    handled_pagers += 1
+                continue
+            if output and time.monotonic() - last_data >= settle:
+                tail = clean_terminal_output(output).rstrip()
+                last_line = tail.rsplit("\n", 1)[-1] if tail else ""
+                if pattern.search(last_line):
+                    break
+                # Nothing is arriving and the prompt is not back: the device is
+                # either still thinking or waiting for something this command
+                # was not supposed to ask. Give it the read timeout, then stop.
+                if time.monotonic() - last_data >= float(self.config.get("read_timeout", 4)) * 3:
+                    break
+            time.sleep(0.02)
+        self._log(f"\n### CAPTURE {command}\n{output}")
         return output
 
     def probe_prompt(self) -> str:

@@ -5,7 +5,31 @@ from pathlib import Path
 
 import pytest
 
-from cliradar.session import SwitchSession
+from cliradar.session import CONFIRM_RE, SwitchSession
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "[Y/N]:",
+        "(y/n)",
+        "(y or n)?",
+        "[yes,no] (no):",
+        "Continue? [Y/N]",
+        "Are you sure you want to continue",
+        "Proceed? [yes/no]",
+        "Warning: the device will restart. Continue?",
+    ],
+)
+def test_confirm_re_catches_every_dialog_form(prompt: str) -> None:
+    # An unanswered confirmation swallows every later keystroke, so a form the
+    # pattern misses is a command run against a device that thinks it is still
+    # reading a yes/no. VRP writes all of these.
+    assert CONFIRM_RE.search(prompt)
+
+
+def test_confirm_re_leaves_ordinary_output_alone() -> None:
+    assert not CONFIRM_RE.search("interface 10GE1/0/1 is up, line protocol is up")
 
 
 @pytest.mark.parametrize("prefix", ["show\nreload ", "show?", "sh\u043ew "])

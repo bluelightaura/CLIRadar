@@ -147,6 +147,61 @@ def _firmware_section(device: object) -> str:
     )
 
 
+def _configuration_section(configuration: object) -> str:
+    """What the running configuration proved about the catalog.
+
+    This is the strongest completeness check the report carries: a configured
+    line the crawl cannot explain is a hole in the scan, measured against the
+    only witness that cannot be argued with - the running device itself.
+    """
+    if not isinstance(configuration, dict) or not configuration:
+        return ""
+    coverage = float(configuration.get("coverage", 0.0))
+    matched = int(configuration.get("matched", 0))
+    elsewhere = int(configuration.get("matched_elsewhere", 0))
+    unmatched = int(configuration.get("unmatched", 0))
+    source = escape(str(configuration.get("source_command", "")))
+    missing = configuration.get("missing_from_catalog")
+    missing_items = missing if isinstance(missing, list) else []
+
+    stats = (
+        '<section class="stats" aria-label="Покрытие конфигурации">'
+        f"<div><strong>{coverage:.1%}</strong><small>строк конфигурации объяснено</small></div>"
+        f"<div><strong>{matched + elsewhere}</strong><small>найдено в каталоге</small></div>"
+        f"<div><strong>{unmatched}</strong><small>нет в каталоге</small></div>"
+        "</section>"
+    )
+    if missing_items:
+        rows = "".join(
+            f"<tr><td>{index}</td>"
+            f"<td><code>{escape(str(item.get('command', '')))}</code></td>"
+            f"<td>{escape(str(item.get('occurrences', 1)))}</td></tr>"
+            for index, item in enumerate(missing_items, start=1)
+            if isinstance(item, dict)
+        )
+        table = (
+            '<p class="warning"><strong>Эти строки настроены на устройстве, но обход '
+            "их не нашёл.</strong> Это дыры каталога: устройство исполняет команду, "
+            "которой нет в собранной поверхности. Значения свёрнуты в "
+            "<code>&lt;value&gt;</code>.</p>"
+            '<div class="table-wrap"><table>'
+            "<thead><tr><th>#</th><th>Команда (по конфигурации)</th><th>Строк</th></tr></thead>"
+            f"<tbody>{rows}</tbody></table></div>"
+        )
+    else:
+        table = (
+            '<p class="notice">Каждая строка конфигурации объяснена каталогом: '
+            "обход нашёл все команды, которыми устройство настроено.</p>"
+        )
+    return (
+        f"<h2>Конфигурация против каталога <span>{escape(str(configuration.get('lines', 0)))}"
+        "</span></h2>"
+        f"<p class='notice'>Источник: <code>{source}</code>. Разобранное дерево — в "
+        "отдельном приватном файле; здесь только сверка с каталогом.</p>"
+        f"{stats}{table}"
+    )
+
+
 def _graph_section(scan: dict[str, object]) -> str:
     contexts = scan.get("contexts")
     if not isinstance(contexts, list) or not contexts:
@@ -210,6 +265,7 @@ def render_html_report(catalog: Catalog) -> str:
             "поэтому определить отсутствующие команды невозможно.</p>"
         )
     body = _firmware_section(payload.get("device")) + body
+    body += _configuration_section(payload.get("configuration"))
     body += _graph_section(scan)
 
     generated_at = escape(str(payload["generated_at"]))

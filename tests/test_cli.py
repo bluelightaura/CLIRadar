@@ -161,6 +161,26 @@ class FakeSession(FakeDevice):
     def open_extra_channels(self, count: int) -> list[object]:
         return []
 
+    def capture_output(self, command: str) -> str:
+        """The running configuration, as the device would print it."""
+        if "current-configuration" not in command:
+            raise RuntimeError("unknown command")
+        return "\n".join(
+            [
+                f"SW1#{command}",
+                "#",
+                "configure",
+                " hostname SW1",
+                "#",
+                "interface 10ge1/0/7",
+                " ip address 192.0.2.7",
+                " sflow sampling-rate 4096",
+                "#",
+                "return",
+                "SW1#",
+            ]
+        )
+
 
 def test_audit_with_enter_modes_walks_the_context_graph_end_to_end(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -184,6 +204,11 @@ output:
   raw_log: {(tmp_path / "session.log").as_posix()}
   tree_catalog: {(tmp_path / "commands_tree.yml").as_posix()}
   human_catalog: {(tmp_path / "commands_human.yml").as_posix()}
+  config_tree: {(tmp_path / "config_tree.yml").as_posix()}
+discovery:
+  parameter_samples:
+    IFNAME: 10ge1/0/1
+    <1-4094>: "1"
 """,
         encoding="utf-8",
     )
@@ -199,6 +224,22 @@ output:
     assert content["scan"]["executed_commands"]  # the audit trail is published
     names = {item["name"] for item in content["scan"]["contexts"]}
     assert "root" in names and "root/configure" in names
+
+    # The other half of the scan: the device's own configuration, parsed and
+    # held against the catalog the crawl just built.
+    configuration = content["configuration"]
+    assert configuration["source_command"] == "display current-configuration"
+    # `configure hostname WORD` was crawled, so the configured line is explained.
+    assert configuration["matched"] >= 1
+    # `sflow sampling-rate` exists on the device but was never offered by help:
+    # that is the finding this half is for.
+    missing = {item["command"] for item in configuration["missing_from_catalog"]}
+    assert any("sflow" in command for command in missing)
+    # A configured value never reaches the shared catalog.
+    assert not any("4096" in command for command in missing)
+    tree = (tmp_path / "config_tree.yml").read_text(encoding="utf-8")
+    assert "interface 10ge1/0/7" in tree
+    assert "192.0.2.7" in tree  # the private artifact keeps the real values
 
 
 def test_docs_mode_parses_documentation_without_device_configuration(
