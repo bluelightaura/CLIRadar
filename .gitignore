@@ -1,0 +1,17 @@
+.venv/
+.venv-dev/
+.env
+.env.*
+config.yml
+config.*.yml
+!config.example.yml
+*.log
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+output/
+vendor_docs/*
+!vendor_docs/example.md

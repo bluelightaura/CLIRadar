@@ -1,0 +1,48 @@
+device:
+  host: "device.example.invalid"
+  port: 22
+  username: automation
+  password_env: SWITCH_PASSWORD
+  prompt_pattern: '(?m)^[^\r\n]+[>#]\s*$'
+  connect_timeout: 10
+  read_timeout: 4
+  idle_timeout: 0.35
+  max_response_bytes: 2097152
+
+discovery:
+  max_depth: 32
+  max_queries: 100000
+  # Extra shell channels over the same SSH connection speed up the crawl.
+  # Devices with a low vty limit silently fall back to fewer channels.
+  parallel_channels: 1
+  # Optional targeted branches are scanned after the full root command tree.
+  seed_commands: []
+  # Read-only commands run once before the crawl so every report states which
+  # firmware it describes; a catalog cannot be compared across versions without
+  # it. Vendors disagree on the verb ('display version' on VRP-style CLIs), and
+  # a command that could modify the device is rejected. Hostname, serial, MAC
+  # and credential lines are stripped from the output. Set to [] to disable.
+  version_commands:
+    - show version
+  # Some NOS implementations can attach side effects even to contextual '?'.
+  # Validate the platform in a lab and list branches that must not be expanded.
+  denied_tokens: []
+  parameter_policy: explore
+  # Numeric ranges such as <1-4094> receive an automatic sample. Add one real
+  # value for parameter kinds that cannot be inferred from contextual help.
+  # A configured key also marks a lowercase documentation token as a parameter.
+  parameter_samples: {}
+  # parameter_samples:
+  #   WORD: Ethernet1/1
+  #   A.B.C.D: 192.0.2.1
+
+output:
+  documentation_catalog: output/cli_doc.yml
+  device_catalog: output/cli_real.yml
+  comparison_catalog: output/cli_compare.yml
+  html_report: output/missing_commands.html
+  # Nested token tree and a flat human-readable command list.
+  tree_catalog: output/commands_tree.yml
+  human_catalog: output/commands_human.yml
+  # Opt in only while troubleshooting: device output may contain sensitive data.
+  raw_log: null
