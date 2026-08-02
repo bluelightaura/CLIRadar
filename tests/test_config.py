@@ -191,3 +191,89 @@ device:
     )
 
     assert load_config(path).device.port == 2323
+
+
+def test_config_commands_default_override_and_disable(tmp_path: Path) -> None:
+    path = tmp_path / "config.yml"
+
+    def written(body: str) -> object:
+        path.write_text(
+            "device:\n  host: switch.example.test\n  username: readonly\n" + body,
+            encoding="utf-8",
+        )
+        return load_config(path).discovery
+
+    assert written("").config_commands == (
+        "display current-configuration",
+        "show running-config",
+    )
+    assert written(
+        "discovery:\n  config_commands:\n    - display current-configuration all\n"
+    ).config_commands == ("display current-configuration all",)
+    assert written("discovery:\n  config_commands: []\n").config_commands == ()
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["erase startup-config", "reset saved-configuration", "write", "delete vrpcfg"],
+)
+def test_config_commands_reject_a_command_that_changes_the_device(
+    tmp_path: Path, command: str
+) -> None:
+    path = tmp_path / "config.yml"
+    path.write_text(
+        f"device:\n  host: switch.example.test\n  username: readonly\n"
+        f"discovery:\n  config_commands:\n    - {command}\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigurationError, match="config_commands"):
+        load_config(path)
+
+
+def test_parser_profile_and_probe_flags_load(tmp_path: Path) -> None:
+    path = tmp_path / "config.yml"
+    path.write_text(
+        """
+device:
+  host: switch.example.test
+  username: readonly
+discovery:
+  probe_invented_values: true
+  parser_profile:
+    accept_undescribed_options: true
+    error_words_are_commands: true
+""",
+        encoding="utf-8",
+    )
+    discovery = load_config(path).discovery
+    assert discovery.probe_invented_values is True
+    assert discovery.accept_undescribed_options is True
+    assert discovery.error_words_are_commands is True
+
+
+def test_parser_profile_rejects_unknown_settings(tmp_path: Path) -> None:
+    path = tmp_path / "config.yml"
+    path.write_text(
+        """
+device:
+  host: switch.example.test
+  username: readonly
+discovery:
+  parser_profile:
+    accept_everything: true
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigurationError, match="parser_profile"):
+        load_config(path)
+
+
+def test_capture_timeout_is_bounded(tmp_path: Path) -> None:
+    path = tmp_path / "config.yml"
+    path.write_text(
+        "device:\n  host: switch.example.test\n  username: readonly\n"
+        "  capture_timeout: 5000\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigurationError, match="capture_timeout"):
+        load_config(path)

@@ -132,6 +132,12 @@ class ModeScanReport:
     reopens: int = 0
     unreachable: list[str] = field(default_factory=list)
     probes_skipped: int = 0
+    # Candidates that were never typed because a parameter had no configured
+    # sample. Reported rather than filled in with an invented value: this is
+    # the number that tells an operator what `discovery.parameter_samples`
+    # would buy, and the placeholders say which samples to add.
+    probes_unsampled: int = 0
+    unsampled_parameters: set[str] = field(default_factory=set)
 
     @property
     def commands(self) -> int:
@@ -175,6 +181,8 @@ class ModeScanReport:
             "channel_reopens": self.reopens,
             "unreachable_contexts": list(self.unreachable),
             "probes_skipped": self.probes_skipped,
+            "probes_unsampled": self.probes_unsampled,
+            "unsampled_parameters": sorted(self.unsampled_parameters),
         }
 
 
@@ -186,12 +194,18 @@ def sample_command(
 ) -> str | None:
     """Make a command typeable, or None when a parameter cannot be filled in.
 
-    `allow_generic` guards probing. A specific placeholder such as `IFNAME`
-    names an object that already exists, so entering it changes nothing. A
-    catch-all such as `WORD` appears on hundreds of unrelated commands, and
-    filling it in invents a value: on a live switch `hostname WORD` renamed
-    the device. Probes therefore refuse catch-alls while still entering
-    interfaces, VLANs and other identified objects.
+    `allow_generic` separates reading from writing. A help query is harmless
+    whatever value it carries, so the crawler fills a numeric range with its
+    minimum and a catch-all with a configured sample.
+
+    A probe executes what it types, and there an invented value is a change
+    nobody asked for. The minimum of a range reads as innocent and is not:
+    inside an interface context `speed <10-40000>` becomes `speed 10`, `mtu
+    <68-9216>` becomes `mtu 68` and `spanning-tree priority <0-61440>` becomes
+    priority 0 - each one applied to a live port. A catch-all is no better:
+    `hostname WORD` renamed a switch in a lab. So a probe types only values the
+    operator supplied in `discovery.parameter_samples`; anything else is left
+    unprobed and counted, which costs contexts rather than the device.
     """
     from .crawler import NUMERIC_RANGE_RE
 
@@ -201,16 +215,18 @@ def sample_command(
         if option_kind(token) != "parameter":
             tokens.append(token)
             continue
+        generic = token.strip("<>").upper() in GENERIC_PLACEHOLDERS
+        sample = lookup.get(token.casefold())
+        if sample is not None and (allow_generic or not generic):
+            tokens.append(sample)
+            continue
+        if not allow_generic:
+            return None
         numeric = NUMERIC_RANGE_RE.match(token)
         if numeric:
             tokens.append(numeric.group("minimum"))
             continue
-        if not allow_generic and token.strip("<>").upper() in GENERIC_PLACEHOLDERS:
-            return None
-        sample = lookup.get(token.casefold())
-        if sample is None:
-            return None
-        tokens.append(sample)
+        return None
     return " ".join(tokens)
 
 
@@ -222,7 +238,10 @@ def scan_modes(
     hints: Sequence[str] = DEFAULT_MODE_HINTS,
     denylist: frozenset[str] = DEFAULT_PROBE_DENYLIST,
     workers: Sequence[ModeNavigator] = (),
-    probe_generic_placeholders: bool = False,
+    # Off by default: a probe executes what it types, so inventing a value is
+    # a change nobody asked for. Turn it on for a lab device, where entering
+    # every context matters more than what entering it costs.
+    probe_invented_values: bool = False,
     max_probes_per_context: int = 200,
     max_contexts: int = 64,
     root_probe_allowlist: frozenset[str] | None = None,
@@ -276,10 +295,15 @@ def scan_modes(
         if callable(on_context):
             on_context(scan)
 
-        candidates = _probe_candidates(
+        candidates, unsampled = _probe_candidates(
             scan, denylist, hints, limits.parameter_samples,
             root_probe_allowlist if context is root else None,
-            probe_generic_placeholders,
+            probe_invented_values,
+        )
+        report.probes_unsampled += len(unsampled)
+        report.unsampled_parameters.update(
+            token for command in unsampled for token in command.split()
+            if option_kind(token) == "parameter"
         )
         # Probing executes what it types, and a large context offers thousands
         # of candidates of which only the first few plausibly open anything.
@@ -357,8 +381,10 @@ def _probe_candidates(
     samples: Sequence[tuple[str, str]],
     allowlist: frozenset[str] | None,
     allow_generic: bool = False,
-) -> list[str]:
+) -> tuple[list[str], list[str]]:
+    """Probe candidates, and the commands left untried for want of a sample."""
     candidates: list[str] = []
+    unsampled: list[str] = []
     for command in scan.executables:
         if not is_probe_allowed(command, denylist):
             continue
@@ -367,7 +393,9 @@ def _probe_candidates(
         typed = sample_command(command, samples, allow_generic=allow_generic)
         if typed:
             candidates.append(typed)
-    return probe_order(candidates, hints)
+        else:
+            unsampled.append(command)
+    return probe_order(candidates, hints), unsampled
 
 
 def _probe(navigator: ModeNavigator, context: ModeContext, command: str) -> ProbeRecord:

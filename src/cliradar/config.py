@@ -33,6 +33,9 @@ class DeviceConfig:
     connect_timeout: float = 10.0
     read_timeout: float = 4.0
     idle_timeout: float = 0.35
+    # A configuration dump is orders of magnitude larger than a help answer and
+    # arrives in pages, so it gets its own budget instead of the read timeout.
+    capture_timeout: float = 120.0
     max_response_bytes: int = 2 * 1024 * 1024
     known_hosts: str | None = None
 
@@ -47,6 +50,10 @@ class DeviceConfig:
             raise ConfigurationError("device.port must be between 1 and 65535")
         if not self.password_env or not self.password_env.isidentifier():
             raise ConfigurationError("device.password_env must be a valid environment variable name")
+        if not 0 < self.capture_timeout <= 3600:
+            raise ConfigurationError(
+                "device.capture_timeout must be greater than 0 and at most 3600"
+            )
         for name, value in (
             ("connect_timeout", self.connect_timeout),
             ("read_timeout", self.read_timeout),
@@ -74,6 +81,7 @@ class DeviceConfig:
             "connect_timeout": self.connect_timeout,
             "read_timeout": self.read_timeout,
             "idle_timeout": self.idle_timeout,
+            "capture_timeout": self.capture_timeout,
             "max_response_bytes": self.max_response_bytes,
             "known_hosts": self.known_hosts,
         }
@@ -98,11 +106,28 @@ class DiscoveryConfig:
     max_probes_per_context: int = 200
     deduplicate_subtrees: bool = True
     verify_samples: int = 25
+    # Whether a context-opening probe may type a value the operator never
+    # supplied. Off by default: the minimum of a range reads as innocent and is
+    # not - inside an interface view `speed <10-40000>` becomes `speed 10` on a
+    # live port. Turn it on for a lab device to reach every last context.
+    probe_invented_values: bool = False
     # Read-only commands run once before the crawl so every report states which
     # firmware it describes. A catalog without that stamp cannot be compared
     # against a later run: identical command sets mean nothing across versions.
     # Vendors disagree on the verb, so this is configurable and best-effort.
     version_commands: tuple[str, ...] = ("show version",)
+    # Read-only commands that print the running configuration. They are tried
+    # in order and the first one that answers is used, so the default covers
+    # both dialects without the operator naming the platform.
+    config_commands: tuple[str, ...] = (
+        "display current-configuration",
+        "show running-config",
+    )
+    # How this platform's contextual help deviates from the strict reading.
+    # Both cost precision when wrong, so they stay off until a lab run shows
+    # the behaviour - see `parser.ParserProfile`.
+    accept_undescribed_options: bool = False
+    error_words_are_commands: bool = False
 
     def validate(self) -> None:
         if not 1 <= self.max_depth <= 64:
@@ -124,16 +149,27 @@ class DiscoveryConfig:
         for command in self.seed_commands:
             if not command or not command.isascii() or not command.isprintable() or "?" in command:
                 raise ConfigurationError("discovery.seed_commands contains an unsafe command")
-        for command in self.version_commands:
-            if not command or not command.isascii() or not command.isprintable() or "?" in command:
-                raise ConfigurationError("discovery.version_commands contains an unsafe command")
-            # These commands are executed for real, so a typo here would change
-            # the device instead of describing it.
-            if command.split()[0].lower() in WRITE_VERBS:
-                raise ConfigurationError(
-                    "discovery.version_commands must only read state; "
-                    f"{command.split()[0]!r} can modify the device"
-                )
+        for setting, commands in (
+            ("version_commands", self.version_commands),
+            ("config_commands", self.config_commands),
+        ):
+            for command in commands:
+                if (
+                    not command
+                    or not command.isascii()
+                    or not command.isprintable()
+                    or "?" in command
+                ):
+                    raise ConfigurationError(
+                        f"discovery.{setting} contains an unsafe command"
+                    )
+                # These commands are executed for real, so a typo here would
+                # change the device instead of describing it.
+                if any(token.lower() in WRITE_VERBS for token in command.split()):
+                    raise ConfigurationError(
+                        f"discovery.{setting} must only read state; "
+                        f"{command!r} can modify the device"
+                    )
         for token, sample in self.parameter_samples:
             if (
                 not token
@@ -163,6 +199,10 @@ class OutputConfig:
     html_report: Path = Path("output/missing_commands.html")
     tree_catalog: Path = Path("output/commands_tree.yml")
     human_catalog: Path = Path("output/commands_human.yml")
+    # The device's own configuration, parsed. It is written apart from the
+    # catalog on purpose: the catalog is a description of a platform and can be
+    # shared, this file describes one customer's network and cannot.
+    config_tree: Path = Path("output/config_tree.yml")
     raw_log: Path | None = None
 
     def catalog_for(self, mode: str) -> Path:
@@ -182,6 +222,7 @@ class OutputConfig:
             self.html_report,
             self.tree_catalog,
             self.human_catalog,
+            self.config_tree,
         ]
         if self.raw_log is not None:
             paths.append(self.raw_log)
@@ -242,6 +283,19 @@ def load_config(path: Path, *, require_device: bool = True) -> AppConfig:
         if "version_commands" in discovery
         else list(DiscoveryConfig.version_commands)
     )
+    config_commands = (
+        _sequence(discovery, "config_commands")
+        if "config_commands" in discovery
+        else list(DiscoveryConfig.config_commands)
+    )
+    parser_profile = discovery.get("parser_profile", {})
+    if not isinstance(parser_profile, dict):
+        raise ConfigurationError("discovery.parser_profile must be a YAML mapping")
+    unknown = set(parser_profile) - {"accept_undescribed_options", "error_words_are_commands"}
+    if unknown:
+        raise ConfigurationError(
+            f"discovery.parser_profile has unknown settings: {', '.join(sorted(unknown))}"
+        )
     # A telnet CLI does not live on the SSH port, and a config that names the
     # transport but not the port would otherwise dial 22 and wait out the
     # read timeout with no hint why.
@@ -261,6 +315,7 @@ def load_config(path: Path, *, require_device: bool = True) -> AppConfig:
                 connect_timeout=float(device.get("connect_timeout", 10)),
                 read_timeout=float(device.get("read_timeout", 4)),
                 idle_timeout=float(device.get("idle_timeout", 0.35)),
+                capture_timeout=float(device.get("capture_timeout", 120)),
                 max_response_bytes=int(device.get("max_response_bytes", 2 * 1024 * 1024)),
                 known_hosts=(
                     str(device["known_hosts"]) if device.get("known_hosts") is not None else None
@@ -285,7 +340,17 @@ def load_config(path: Path, *, require_device: bool = True) -> AppConfig:
                 max_probes_per_context=int(discovery.get("max_probes_per_context", 200)),
                 deduplicate_subtrees=bool(discovery.get("deduplicate_subtrees", True)),
                 verify_samples=int(discovery.get("verify_samples", 25)),
+                probe_invented_values=bool(
+                    discovery.get("probe_invented_values", False)
+                ),
                 version_commands=tuple(str(item) for item in version_commands),
+                config_commands=tuple(str(item) for item in config_commands),
+                accept_undescribed_options=bool(
+                    parser_profile.get("accept_undescribed_options", False)
+                ),
+                error_words_are_commands=bool(
+                    parser_profile.get("error_words_are_commands", False)
+                ),
             ),
             output=OutputConfig(
                 documentation_catalog=Path(
@@ -306,6 +371,7 @@ def load_config(path: Path, *, require_device: bool = True) -> AppConfig:
                 human_catalog=Path(
                     output.get("human_catalog", "output/commands_human.yml")
                 ),
+                config_tree=Path(output.get("config_tree", "output/config_tree.yml")),
                 raw_log=Path(output["raw_log"]) if output.get("raw_log") else None,
             ),
         )

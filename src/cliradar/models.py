@@ -69,6 +69,10 @@ class Catalog:
     commands: dict[str, CommandEntry] = field(default_factory=dict)
     mode: str = "audit"
     scan: dict[str, Any] = field(default_factory=dict)
+    # What the device's own configuration proved about this catalog: how much
+    # of it the crawl can account for, and which configured commands it cannot.
+    # Only the shape of the finding is kept here - never a configured value.
+    configuration: dict[str, Any] = field(default_factory=dict)
     # Command prefixes whose contextual help was read in full ("" is the root).
     # Every keyword a node offers is catalogued before any policy can skip it,
     # so a keyword absent from an enumerated node is absent from the device -
@@ -151,6 +155,8 @@ class Catalog:
         }
         if self.mode != "docs":
             result["device"] = self.device
+        if self.configuration:
+            result["configuration"] = self.configuration
         result.update(
             {
                 "scan": self.scan,

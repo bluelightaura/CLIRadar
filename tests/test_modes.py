@@ -23,7 +23,9 @@ from cliradar.navigator import ModeContext, ModeNavigator
 LIMITS = CrawlLimits(
     max_depth=4,
     max_queries=200,
-    parameter_samples=(("IFNAME", "10ge1/0/1"),),
+    # A probe types only values the operator supplied, so a context that is
+    # entered by number is only reachable when its range has a sample.
+    parameter_samples=(("IFNAME", "10ge1/0/1"), ("<1-4094>", "10")),
 )
 
 
@@ -256,7 +258,16 @@ def test_catch_all_placeholders_are_not_probed_by_default() -> None:
         sample_command("interface IFNAME", samples, allow_generic=False)
         == "interface 10ge1/0/1"
     )
-    assert sample_command("vlan <1-4094>", samples, allow_generic=False) == "vlan 1"
+    # Nor is a numeric range filled in with its minimum: `speed <10-40000>`
+    # would become `speed 10` on a live port. A probe types only what the
+    # operator supplied.
+    assert sample_command("vlan <1-4094>", samples, allow_generic=False) is None
+    assert (
+        sample_command("vlan <1-4094>", (*samples, ("<1-4094>", "10")), allow_generic=False)
+        == "vlan 10"
+    )
+    # The reading crawl is free to guess: a help query changes nothing.
+    assert sample_command("vlan <1-4094>", samples) == "vlan 1"
 
 
 def test_scan_does_not_execute_named_parameter_commands() -> None:

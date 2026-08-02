@@ -7,6 +7,9 @@ device:
   connect_timeout: 10
   read_timeout: 4
   idle_timeout: 0.35
+  # A running configuration is far larger than a help answer and arrives in
+  # pages, so reading it has its own budget rather than the per-query timeout.
+  capture_timeout: 120
   max_response_bytes: 2097152
 
 discovery:
@@ -24,10 +27,33 @@ discovery:
   # and credential lines are stripped from the output. Set to [] to disable.
   version_commands:
     - show version
+  # Read-only commands that print the running configuration. It is parsed and
+  # held against the catalog the crawl builds: a configured line the crawl
+  # never found is the one piece of evidence that the command surface is
+  # incomplete, without needing a second device to compare against. The
+  # dialects below are tried in order and the first that answers is used;
+  # passwords and keys are stripped, but the parsed tree still describes one
+  # real network and is written to a separate, private file. Set to [] to skip.
+  config_commands:
+    - display current-configuration
+    - show running-config
   # Some NOS implementations can attach side effects even to contextual '?'.
   # Validate the platform in a lab and list branches that must not be expanded.
   denied_tokens: []
   parameter_policy: explore
+  # A context-opening probe executes what it types. By default it types only
+  # values you supply in parameter_samples: filling a numeric range with its
+  # minimum can apply 'speed 10' or 'mtu 68' to a live port. Turn this on only
+  # against a lab device, to reach every last context.
+  probe_invented_values: false
+  # How this platform's contextual help deviates from the strict reading. Both
+  # trade a class of missed commands for a class of invented ones, so enable
+  # each only after seeing the behaviour in a lab (see the parser audit notes).
+  parser_profile:
+    # Read a bare indented word (no description) as an option.
+    accept_undescribed_options: false
+    # Treat error/invalid/unknown/... inside the option block as command names.
+    error_words_are_commands: false
   # Numeric ranges such as <1-4094> receive an automatic sample. Add one real
   # value for parameter kinds that cannot be inferred from contextual help.
   # A configured key also marks a lowercase documentation token as a parameter.
@@ -44,5 +70,9 @@ output:
   # Nested token tree and a flat human-readable command list.
   tree_catalog: output/commands_tree.yml
   human_catalog: output/commands_human.yml
+  # The device's own running configuration, parsed into a view tree and
+  # annotated with the lines the catalog cannot explain. It describes one real
+  # network, so it is written apart from the shareable catalog and kept private.
+  config_tree: output/config_tree.yml
   # Opt in only while troubleshooting: device output may contain sensitive data.
   raw_log: null

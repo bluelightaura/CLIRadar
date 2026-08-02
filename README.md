@@ -224,6 +224,47 @@ pointing the setting at `show running-config` does not put secrets into a
 report you share. Redaction is a safety net, not a guarantee — review the
 stamp before publishing a report from an unfamiliar platform.
 
+## Running configuration versus the catalog
+
+The crawl answers "what can this box be told to do"; the running configuration
+answers "what has it actually been told". CLIRadar reads it with one read-only
+command before the crawl and matches every configured line against the catalog
+it builds:
+
+```yaml
+discovery:
+  config_commands:            # tried in order; first that answers wins
+    - display current-configuration
+    - show running-config
+```
+
+The dump is parsed structurally — indentation and section separators (`#` on
+VRP, `!` elsewhere) rebuild the view hierarchy — so a platform CLIRadar has
+never seen still yields a tree. Each line is then looked up under every view
+path the scan actually stood in, with instance numbers folded, so
+`interface 10GE1/0/24` matches a catalog that was walked through
+`interface 10GE1/0/1`.
+
+The disagreement is the finding. A configured line the catalog does not contain
+means the device is executing a command the crawl never found — the only
+evidence of an incomplete command surface that does not require a second device
+to compare against. Those lines appear in the catalog under
+`configuration.missing_from_catalog` and in the HTML report, with every value
+folded to `<value>`: which command is missing describes the platform, the
+address it was configured with describes your network.
+
+Two artifacts come out of it, deliberately separate:
+
+- the coverage summary inside the catalog and report — shapes only, shareable;
+- `output/config_tree.yml` — the full parsed tree with real values, each
+  unexplained line marked in place. It describes one live network, so it is
+  written with private permissions and belongs in no report. Passwords, keys
+  and community strings are blanked before it is written.
+
+Reading the dump has its own budget (`device.capture_timeout`, default 120 s),
+because a configuration is paged and orders of magnitude larger than a help
+answer. Set `config_commands: []` to skip the whole step.
+
 ## Output
 
 The default machine-readable outputs are:
