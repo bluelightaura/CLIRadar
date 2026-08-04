@@ -1,5 +1,25 @@
+import re
+from html.parser import HTMLParser
+
 from cliradar.models import Catalog
 from cliradar.report import render_html_report
+
+
+class _ReportHTMLParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.elements: list[tuple[str, dict[str, str | None]]] = []
+
+    def handle_starttag(
+        self, tag: str, attrs: list[tuple[str, str | None]]
+    ) -> None:
+        self.elements.append((tag, dict(attrs)))
+
+
+def _report_elements(report: str) -> list[tuple[str, dict[str, str | None]]]:
+    parser = _ReportHTMLParser()
+    parser.feed(report)
+    return parser.elements
 
 
 def test_compare_report_lists_only_confirmed_missing_commands() -> None:
@@ -233,3 +253,161 @@ def test_report_without_configuration_omits_the_section() -> None:
     )
     report = render_html_report(catalog)
     assert "Конфигурация против каталога" not in report
+
+
+def test_search_has_unique_ids_and_only_filters_command_findings() -> None:
+    catalog = Catalog(
+        device={"identity": "redacted"},
+        mode="compare",
+        scan={
+            "complete": False,
+            "queries": 9,
+            "contexts": [
+                {
+                    "fingerprint": "#",
+                    "entry_path": [],
+                    "commands": 3,
+                    "complete": True,
+                },
+                {
+                    "fingerprint": "(config)#",
+                    "entry_path": ["configure"],
+                    "commands": 1,
+                    "complete": False,
+                },
+            ],
+        },
+        enumerated={""},
+    )
+    catalog.add("debug", "Debug commands", "cli")
+    catalog.add("show missing", "Confirmed missing", "documentation:commands.txt")
+    catalog.add("debug unseen", "Not reached", "documentation:commands.txt")
+    catalog.configuration = {
+        "source_command": "show running-config",
+        "lines": 2,
+        "matched": 1,
+        "matched_elsewhere": 0,
+        "unmatched": 1,
+        "coverage": 0.5,
+        "missing_from_catalog": [
+            {"command": "interface <value> mystery", "occurrences": 1},
+        ],
+    }
+
+    report = render_html_report(catalog)
+    elements = _report_elements(report)
+    ids = [attrs["id"] for _, attrs in elements if attrs.get("id")]
+    command_rows = [
+        attrs
+        for tag, attrs in elements
+        if tag == "tr" and "data-command-row" in attrs
+    ]
+    all_rows = [attrs for tag, attrs in elements if tag == "tr"]
+
+    assert len(ids) == len(set(ids))
+    assert ids.count("search") == 1
+    assert ids.count("counter") == 1
+    assert ids.count("clear-search") == 1
+    assert len(command_rows) == 2
+    assert all("data-text" in attrs for attrs in command_rows)
+    assert len(all_rows) > len(command_rows)
+    assert re.search(
+        r"querySelectorAll\((['\"])\[data-command-row\]\1\)", report
+    )
+    assert "querySelectorAll('tbody tr')" not in report
+    assert 'querySelectorAll("tbody tr")' not in report
+
+
+def test_search_and_tables_expose_accessible_names_and_live_results() -> None:
+    catalog = Catalog(
+        device={"identity": "redacted"},
+        mode="compare",
+        scan={"complete": True, "queries": 2},
+    )
+    catalog.add("show missing", "Missing command", "documentation:commands.txt")
+
+    elements = _report_elements(render_html_report(catalog))
+    searches = [
+        attrs
+        for tag, attrs in elements
+        if tag == "input" and attrs.get("type") == "search"
+    ]
+    counters = [attrs for _, attrs in elements if attrs.get("id") == "counter"]
+    headings = [attrs for tag, attrs in elements if tag == "th"]
+    element_ids = {attrs["id"] for _, attrs in elements if attrs.get("id")}
+
+    assert searches == [
+        {
+            **searches[0],
+            "aria-label": "Поиск по командам и описаниям",
+            "aria-controls": "command-findings",
+        }
+    ]
+    assert "command-findings" in element_ids
+    assert len(counters) == 1
+    assert counters[0].get("aria-live") == "polite"
+    assert headings
+    assert all(attrs.get("scope") == "col" for attrs in headings)
+
+
+def test_complete_compare_without_missing_commands_has_an_explicit_success_state() -> None:
+    catalog = Catalog(
+        device={"identity": "redacted"},
+        mode="compare",
+        scan={"complete": True, "queries": 2},
+    )
+    catalog.add("show version", "Software version", "cli")
+    catalog.add("show version", "Software version", "documentation:commands.txt")
+
+    report = render_html_report(catalog)
+
+    assert 'data-scan-state="complete"' in report
+    assert "Подтверждённых расхождений не найдено" in report
+    assert "Обход неполный" not in report
+
+
+def test_incomplete_compare_without_unobserved_commands_is_not_shown_as_successful() -> None:
+    catalog = Catalog(
+        device={"identity": "redacted"},
+        mode="compare",
+        scan={"complete": False, "queries": 2},
+    )
+    catalog.add("show version", "Software version", "cli")
+    catalog.add("show version", "Software version", "documentation:commands.txt")
+
+    payload = catalog.to_dict()
+    assert payload["summary"]["not_observed"] == 0
+
+    report = render_html_report(catalog)
+
+    assert 'data-scan-state="incomplete"' in report
+    assert "Обход неполный" in report
+    assert "результат нельзя считать исчерпывающим" in report
+    assert "Подтверждённых расхождений не найдено" not in report
+
+
+def test_configuration_gap_prevents_a_global_success_state() -> None:
+    catalog = Catalog(
+        device={"identity": "redacted"},
+        mode="compare",
+        scan={"complete": True, "queries": 2},
+    )
+    catalog.add("show version", "Software version", "cli")
+    catalog.add("show version", "Software version", "documentation:commands.txt")
+    catalog.configuration = {
+        "source_command": "show running-config",
+        "lines": 1,
+        "matched": 0,
+        "matched_elsewhere": 0,
+        "unmatched": 1,
+        "coverage": 0.0,
+        "missing_from_catalog": [
+            {"command": "interface <value> mystery", "occurrences": 1},
+        ],
+    }
+
+    report = render_html_report(catalog)
+
+    assert 'data-scan-state="complete"' in report
+    assert "конфигурация выявила пробелы каталога" in report
+    assert "Подтверждённых расхождений не найдено" not in report

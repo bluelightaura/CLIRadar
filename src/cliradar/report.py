@@ -9,26 +9,46 @@ _SEARCH_SCRIPT = """
     var input = document.getElementById('search');
     if (!input) return;
     var counter = document.getElementById('counter');
+    var clearButton = document.getElementById('clear-search');
     var rows = Array.prototype.slice.call(
-      document.querySelectorAll('tbody tr')
+      document.querySelectorAll('[data-command-row]')
     );
     function apply() {
       var query = input.value.trim().toLowerCase();
       var shown = 0;
       rows.forEach(function (row) {
-        var hit = !query || row.getAttribute('data-text').indexOf(query) !== -1;
+        var text = row.getAttribute('data-text') || '';
+        var hit = !query || text.indexOf(query) !== -1;
         row.hidden = !hit;
         if (hit) shown += 1;
       });
       counter.textContent = shown + ' из ' + rows.length;
+      clearButton.disabled = !query;
     }
     input.addEventListener('input', apply);
+    clearButton.addEventListener('click', function () {
+      input.value = '';
+      apply();
+      input.focus();
+    });
     apply();
   })();
 """
 
 
-def _command_rows(commands: list[dict[str, object]]) -> str:
+def _search_toolbar(total: int) -> str:
+    return (
+        '<div class="toolbar">'
+        '<input id="search" type="search" autocomplete="off" spellcheck="false"'
+        ' aria-label="Поиск по командам и описаниям" aria-controls="command-findings"'
+        ' placeholder="Поиск по командам и описаниям…">'
+        '<button id="clear-search" type="button">Очистить</button>'
+        f'<span id="counter" aria-live="polite" aria-atomic="true">{total} из {total}</span>'
+        '</div>'
+    )
+
+
+def _command_rows(commands: list[dict[str, object]], *, table_label: str) -> str:
     if not commands:
         return '<p class="empty">Команды не найдены.</p>'
 
@@ -40,19 +60,14 @@ def _command_rows(commands: list[dict[str, object]]) -> str:
             f"{item.get('command', '')} {item.get('description', '')}".lower()
         )
         rows.append(
-            f'<tr data-text="{haystack}"><td>{index}</td>'
+            f'<tr data-command-row data-text="{haystack}"><td>{index}</td>'
             f"<td><code>{command}</code></td>"
             f"<td>{description}</td></tr>"
         )
-    total = len(rows)
     return (
-        '<div class="toolbar">'
-        '<input id="search" type="search" autocomplete="off" spellcheck="false"'
-        ' placeholder="Поиск по командам и описаниям…">'
-        f'<span id="counter">{total} из {total}</span>'
-        "</div>"
-        '<div class="table-wrap"><table>'
-        "<thead><tr><th>#</th><th>Команда</th><th>Описание</th></tr></thead>"
+        f'<div class="table-wrap"><table aria-label="{escape(table_label)}">'
+        '<thead><tr><th scope="col">#</th><th scope="col">Команда</th>'
+        '<th scope="col">Описание</th></tr></thead>'
         f"<tbody>{''.join(rows)}</tbody></table></div>"
     )
 
@@ -92,8 +107,9 @@ def _context_rows(contexts: list[dict[str, object]]) -> str:
             f"<td>{escape(_context_state(item))}</td></tr>"
         )
     return (
-        '<div class="table-wrap"><table>'
-        "<thead><tr><th>Промпт</th><th>Путь входа</th><th>Команд</th><th>Обход</th></tr></thead>"
+        '<div class="table-wrap"><table aria-label="Контексты CLI">'
+        '<thead><tr><th scope="col">Промпт</th><th scope="col">Путь входа</th>'
+        '<th scope="col">Команд</th><th scope="col">Обход</th></tr></thead>'
         f"<tbody>{''.join(rows)}</tbody></table></div>"
     )
 
@@ -184,8 +200,10 @@ def _configuration_section(configuration: object) -> str:
             "их не нашёл.</strong> Это дыры каталога: устройство исполняет команду, "
             "которой нет в собранной поверхности. Значения свёрнуты в "
             "<code>&lt;value&gt;</code>.</p>"
-            '<div class="table-wrap"><table>'
-            "<thead><tr><th>#</th><th>Команда (по конфигурации)</th><th>Строк</th></tr></thead>"
+            '<div class="table-wrap"><table aria-label="Пробелы каталога по конфигурации">'
+            '<thead><tr><th scope="col">#</th>'
+            '<th scope="col">Команда (по конфигурации)</th>'
+            '<th scope="col">Строк</th></tr></thead>'
             f"<tbody>{rows}</tbody></table></div>"
         )
     else:
@@ -219,6 +237,35 @@ def _graph_section(scan: dict[str, object]) -> str:
     )
 
 
+def _comparison_state(
+    *, complete: bool, findings: int, configuration_gaps: int
+) -> str:
+    if not complete:
+        return (
+            '<p class="warning" data-scan-state="incomplete">'
+            '<strong>Обход неполный.</strong> Часть поверхности CLI могла остаться '
+            'непроверенной, поэтому результат нельзя считать исчерпывающим.</p>'
+        )
+    if findings:
+        return (
+            '<p class="notice" data-scan-state="complete">'
+            '<strong>Обход справочной поверхности завершён полностью.</strong> '
+            'Ниже перечислены результаты сравнения.</p>'
+        )
+    if configuration_gaps:
+        return (
+            '<p class="warning" data-scan-state="complete">'
+            '<strong>Обход справочной поверхности завершён, но конфигурация выявила '
+            'пробелы каталога.</strong> Настроенные команды не отражены в собранной '
+            'поверхности CLI.</p>'
+        )
+    return (
+        '<p class="success" data-scan-state="complete">'
+        '<strong>Подтверждённых расхождений не найдено между документацией и '
+        'справочной поверхностью устройства.</strong> Обход завершён полностью.</p>'
+    )
+
+
 def render_html_report(catalog: Catalog) -> str:
     payload = catalog.to_dict()
     mode = str(payload["mode"])
@@ -243,22 +290,40 @@ def render_html_report(catalog: Catalog) -> str:
         for item in commands
         if isinstance(item, dict) and item.get("comparison_status") == "not_observed"
     ]
+    configuration = payload.get("configuration")
+    configuration_gaps = 0
+    if isinstance(configuration, dict):
+        missing_from_catalog = configuration.get("missing_from_catalog")
+        listed_gaps = len(missing_from_catalog) if isinstance(missing_from_catalog, list) else 0
+        configuration_gaps = max(int(configuration.get("unmatched", 0)), listed_gaps)
 
     if mode == "compare":
         # An incomplete walk still proves an absence wherever it did stand:
         # the device listed that node's keywords in full. Those findings are
         # stated outright; only the rest is hedged.
-        body = (
+        finding_count = len(missing) + len(not_observed)
+        finding_sections = (
             f"<h2>Нет на устройстве <span>{len(missing)}</span></h2>"
-            f"{_command_rows(missing)}"
+            f'{_command_rows(missing, table_label="Команды, отсутствующие на устройстве")}'
         )
         if not_observed:
-            body += (
+            finding_sections += (
                 f"<h2>Не обнаружены <span>{len(not_observed)}</span></h2>"
                 '<p class="warning"><strong>Обход не дошёл до этих ветвей.</strong> '
                 "Нельзя утверждать, что перечисленных команд нет на устройстве.</p>"
-                f"{_command_rows(not_observed)}"
+                f'{_command_rows(not_observed, table_label="Команды в непроверенных ветвях")}'
             )
+        body = _comparison_state(
+            complete=complete,
+            findings=finding_count,
+            configuration_gaps=configuration_gaps,
+        )
+        if finding_count:
+            body += _search_toolbar(finding_count)
+        body += (
+            '<section id="command-findings" aria-label="Результаты сравнения команд">'
+            f"{finding_sections}</section>"
+        )
     else:
         body = (
             '<p class="notice">Режим <code>audit</code> не использует документацию, '
@@ -319,9 +384,16 @@ def render_html_report(catalog: Catalog) -> str:
     #search {{
       flex: 1 1 16rem; font: inherit; padding: .55rem .9rem;
       border: 1px solid var(--border); border-radius: .6rem;
-      background: var(--soft); color: inherit; outline: none;
+      background: var(--soft); color: inherit;
     }}
     #search:focus {{ border-color: var(--accent); }}
+    #search:focus-visible {{ outline: 2px solid var(--accent); outline-offset: 2px; }}
+    #clear-search {{
+      font: inherit; padding: .55rem .9rem; border: 1px solid var(--border);
+      border-radius: .6rem; background: var(--soft); color: inherit; cursor: pointer;
+    }}
+    #clear-search:focus-visible {{ outline: 2px solid var(--accent); outline-offset: 2px; }}
+    #clear-search:disabled {{ cursor: default; opacity: .5; }}
     #counter {{ opacity: .75; font-variant-numeric: tabular-nums; white-space: nowrap; }}
     .table-wrap {{ overflow-x: auto; border: 1px solid var(--border); border-radius: .75rem; }}
     table {{ width: 100%; border-collapse: collapse; }}
@@ -334,6 +406,10 @@ def render_html_report(catalog: Catalog) -> str:
     .warning {{
       padding: .9rem 1.1rem; border-left: .3rem solid #d98b00;
       background: #d98b0018; border-radius: 0 .6rem .6rem 0;
+    }}
+    .success {{
+      padding: .9rem 1.1rem; border-left: .3rem solid #2f8f55;
+      background: #2f8f5518; border-radius: 0 .6rem .6rem 0;
     }}
     .notice, .empty {{ padding: .9rem 1.1rem; background: var(--soft); border-radius: .6rem; }}
     .firmware pre {{
