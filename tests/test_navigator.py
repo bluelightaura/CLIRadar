@@ -225,7 +225,7 @@ def test_navigator_records_every_executed_command() -> None:
 
 @pytest.mark.parametrize(
     "command",
-    ["reboot", "reload in 5", "erase startup-config", "logout", "exit", "ping 10.0.0.1",
+    ["reboot", "reload in 5", "erase startup-config", "logout", "exit", "ping 192.0.2.1",
      "terminal length 0", "no shutdown", "write memory",
      # The management path: probing here locked a live switch out mid-scan.
      "line vty 1", "line console 1", "username admin", "aaa", "sshd", "service ssh"],
