@@ -38,6 +38,15 @@ class DeviceConfig:
     capture_timeout: float = 120.0
     max_response_bytes: int = 2 * 1024 * 1024
     known_hosts: str | None = None
+    # A Cisco-like login lands in an unprivileged view whose prompt ends in
+    # '>'; the full command surface and the running configuration sit behind an
+    # 'enable' step that ends in '#'. Turn this on to raise the session to
+    # privileged mode right after login. The secret is read from the
+    # environment variable named by enable_password_env (leave it unset when
+    # the device grants enable without a password).
+    enable: bool = False
+    enable_command: str = "enable"
+    enable_password_env: str = "ENABLE_SECRET"
 
     def validate(self) -> None:
         if not self.host or self.host == "device.example.invalid":
@@ -50,6 +59,15 @@ class DeviceConfig:
             raise ConfigurationError("device.port must be between 1 and 65535")
         if not self.password_env or not self.password_env.isidentifier():
             raise ConfigurationError("device.password_env must be a valid environment variable name")
+        if self.enable:
+            if not self.enable_command.strip():
+                raise ConfigurationError(
+                    "device.enable_command must not be empty when device.enable is set"
+                )
+            if not self.enable_password_env or not self.enable_password_env.isidentifier():
+                raise ConfigurationError(
+                    "device.enable_password_env must be a valid environment variable name"
+                )
         if not 0 < self.capture_timeout <= 3600:
             raise ConfigurationError(
                 "device.capture_timeout must be greater than 0 and at most 3600"
@@ -84,6 +102,9 @@ class DeviceConfig:
             "capture_timeout": self.capture_timeout,
             "max_response_bytes": self.max_response_bytes,
             "known_hosts": self.known_hosts,
+            "enable": self.enable,
+            "enable_command": self.enable_command,
+            "enable_password_env": self.enable_password_env,
         }
 
 
@@ -320,6 +341,9 @@ def load_config(path: Path, *, require_device: bool = True) -> AppConfig:
                 known_hosts=(
                     str(device["known_hosts"]) if device.get("known_hosts") is not None else None
                 ),
+                enable=bool(device.get("enable", False)),
+                enable_command=str(device.get("enable_command", "enable")),
+                enable_password_env=str(device.get("enable_password_env", "ENABLE_SECRET")),
             ),
             discovery=DiscoveryConfig(
                 max_depth=int(discovery.get("max_depth", 32)),

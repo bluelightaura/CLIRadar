@@ -31,6 +31,16 @@ CONFIRM_RE = re.compile(
     re.IGNORECASE,
 )
 
+# After 'enable' a Cisco-like CLI either elevates straight to a '#' prompt or
+# asks for a secret first. A wrong secret is rejected with one of these; the
+# net is drawn a little wide because vendors word the refusal differently.
+ENABLE_PASSWORD_RE = re.compile(r"(?i)pass\s*word\s*:\s*$")
+ENABLE_FAIL_RE = re.compile(
+    r"(?i)bad\s+(?:password|secret)s?|access\s+denied|permission\s+denied|"
+    r"authentication\s+fail|%\s*error|%\s*bad|invalid\s+password|"
+    r"password\s+required"
+)
+
 _LOG_LOCK = threading.Lock()
 
 
@@ -74,6 +84,7 @@ class SwitchSession:
             )
             self.channel = self.client.invoke_shell(width=240, height=1000)
             self._read_until_prompt()
+            self._enter_privileged()
         except Exception:
             self.client.close()
             raise
@@ -103,6 +114,7 @@ class SwitchSession:
             try:
                 sibling.channel = self.client.invoke_shell(width=240, height=1000)
                 sibling._read_until_prompt()
+                sibling._enter_privileged()
             except (paramiko.SSHException, OSError, TimeoutError, RuntimeError):
                 if sibling.channel:
                     sibling.channel.close()
@@ -258,6 +270,7 @@ class SwitchSession:
             try:
                 self.channel = self.client.invoke_shell(width=240, height=1000)
                 self._read_until_prompt()
+                self._enter_privileged()
                 self._log("\n### REOPEN CHANNEL\n")
                 return
             except (paramiko.SSHException, OSError, TimeoutError):
@@ -266,6 +279,79 @@ class SwitchSession:
             self.client.close()
         self._connect()
         self._log("\n### RECONNECTED\n")
+
+    def _enter_privileged(self) -> None:
+        """Raise the session to privileged ('enable') mode when configured.
+
+        A Cisco-like login lands in an unprivileged view whose prompt ends in
+        '>'; the full command surface and the running configuration sit behind
+        an 'enable' step that ends in '#'. This runs it once on every freshly
+        opened channel - the initial login, a reopened channel and each extra
+        worker - so the whole crawl sees the same privilege level. It is a
+        no-op unless device.enable is set, so a shell that already drops into
+        '#' is left untouched.
+        """
+        if not self.config.get("enable"):
+            return
+        if not self.channel:
+            raise RuntimeError("session is not connected")
+        command = str(self.config.get("enable_command", "enable"))
+        self._validate_prefix(command)
+        # Clear whatever the login left buffered so the reply read below is the
+        # answer to 'enable' and not a stale prompt line.
+        self._read_available()
+        self.channel.send(command + "\r")
+        transcript, asked_password = self._read_until_match(ENABLE_PASSWORD_RE)
+        if asked_password:
+            env_name = str(self.config.get("enable_password_env", "ENABLE_SECRET"))
+            secret = os.environ.get(env_name, "")
+            self.channel.send(secret + "\r")
+            transcript += self._read_until_idle()
+        self._confirm_privileged(transcript)
+        self._log(f"\n### ENABLE\n{transcript}")
+
+    def _read_until_match(self, pattern: re.Pattern[str]) -> tuple[str, bool]:
+        """Read until the cleaned tail matches `pattern`, or the reads go idle.
+
+        Returns the raw output collected and whether the pattern was seen. It
+        lets the enable step notice an interactive password request without
+        waiting out the full read timeout on a device that never asks for one.
+        """
+        deadline = time.monotonic() + float(self.config.get("read_timeout", 4))
+        idle_timeout = float(self.config.get("idle_timeout", 0.35))
+        last_data = time.monotonic()
+        output = ""
+        while time.monotonic() < deadline:
+            chunk = self._read_available()
+            if chunk:
+                output += chunk
+                self._check_response_size(output)
+                last_data = time.monotonic()
+                if pattern.search(clean_terminal_output(output).rstrip()):
+                    return output, True
+            elif output and time.monotonic() - last_data >= idle_timeout:
+                break
+            else:
+                time.sleep(0.02)
+        return output, False
+
+    def _confirm_privileged(self, transcript: str) -> None:
+        """Verify the session actually reached a privileged ('#') prompt."""
+        prompt = clean_terminal_output(self.probe_prompt())
+        combined = clean_terminal_output(transcript) + "\n" + prompt
+        if ENABLE_FAIL_RE.search(combined):
+            raise RuntimeError(
+                "enable was rejected; check the secret in the environment "
+                f"variable device.enable_password_env "
+                f"({self.config.get('enable_password_env', 'ENABLE_SECRET')})"
+            )
+        last_line = prompt.strip().rsplit("\n", 1)[-1].rstrip() if prompt.strip() else ""
+        if not last_line.endswith("#"):
+            raise RuntimeError(
+                "enable did not reach a privileged prompt ('#'); the account "
+                "may lack the privilege level, or device.enable_command is "
+                f"wrong. The prompt was: {last_line!r}"
+            )
 
     @staticmethod
     def _validate_prefix(prefix: str) -> None:

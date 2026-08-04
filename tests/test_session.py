@@ -284,3 +284,116 @@ def test_closes_client_when_prompt_detection_fails(monkeypatch: pytest.MonkeyPat
         session.__enter__()
 
     assert client.closed is True
+
+
+# -- privileged ('enable') mode ------------------------------------------
+
+
+class ReactiveChannel:
+    """A channel that answers each write with a scripted reply.
+
+    `responder(value)` returns the bytes the device would print in reply to a
+    line the session sent - enough to imitate the enable handshake, where the
+    prompt and password request only appear after a keystroke.
+    """
+
+    def __init__(self, responder: object) -> None:
+        self.chunks: deque[bytes] = deque()
+        self.sent: list[str] = []
+        self.closed = False
+        self._responder = responder
+
+    def recv_ready(self) -> bool:
+        return bool(self.chunks)
+
+    def recv(self, size: int) -> bytes:
+        return self.chunks.popleft()
+
+    def send(self, value: str) -> int:
+        self.sent.append(value)
+        reply = self._responder(value)  # type: ignore[operator]
+        if reply:
+            self.chunks.append(reply)
+        return len(value)
+
+
+def _enable_session(**config: object) -> SwitchSession:
+    base: dict[str, object] = {"enable": True, "read_timeout": 0.5, "idle_timeout": 0.02}
+    base.update(config)
+    return SwitchSession(base)
+
+
+def test_enable_enters_privileged_mode_with_a_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ENABLE_SECRET", "priv-pass")
+
+    def device(value: str) -> bytes:
+        if value == "enable\r":
+            return b"\r\nPassword: "
+        if value == "priv-pass\r" or value == "\r":
+            return b"\r\nSW1#"
+        return b""
+
+    session = _enable_session()
+    session.channel = ReactiveChannel(device)  # type: ignore[assignment]
+
+    session._enter_privileged()
+
+    assert "enable\r" in session.channel.sent
+    assert "priv-pass\r" in session.channel.sent
+
+
+def test_enable_without_a_password_reaches_privileged(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("ENABLE_SECRET", raising=False)
+
+    def device(value: str) -> bytes:
+        if value in ("enable\r", "\r"):
+            return b"\r\nSW1#"
+        return b""
+
+    session = _enable_session()
+    session.channel = ReactiveChannel(device)  # type: ignore[assignment]
+
+    session._enter_privileged()
+
+    # Only the elevation command and the prompt probe - no secret was sent.
+    assert session.channel.sent == ["enable\r", "\r"]
+
+
+def test_enable_reports_a_rejected_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ENABLE_SECRET", "wrong")
+
+    def device(value: str) -> bytes:
+        if value == "enable\r":
+            return b"\r\nPassword: "
+        if value == "wrong\r":
+            return b"\r\n  % Bad secrets\r\nSW1>"
+        return b"\r\nSW1>"
+
+    session = _enable_session()
+    session.channel = ReactiveChannel(device)  # type: ignore[assignment]
+
+    with pytest.raises(RuntimeError, match="rejected"):
+        session._enter_privileged()
+
+
+def test_enable_that_stays_unprivileged_is_an_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("ENABLE_SECRET", raising=False)
+
+    def device(value: str) -> bytes:
+        # 'enable' silently does nothing here; the prompt never leaves '>'.
+        return b"\r\nSW1>"
+
+    session = _enable_session()
+    session.channel = ReactiveChannel(device)  # type: ignore[assignment]
+
+    with pytest.raises(RuntimeError, match="privileged prompt"):
+        session._enter_privileged()
+
+
+def test_enable_is_skipped_when_not_configured() -> None:
+    session = SwitchSession({})
+    session.channel = ReactiveChannel(lambda _value: b"")  # type: ignore[assignment]
+
+    session._enter_privileged()
+
+    assert session.channel.sent == []

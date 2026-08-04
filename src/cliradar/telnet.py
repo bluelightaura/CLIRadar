@@ -145,6 +145,7 @@ class TelnetSession(SwitchSession):
         self.channel = self._open_channel()
         self._login()
         self._read_until_prompt()
+        self._enter_privileged()
 
     def _open_channel(self) -> TelnetChannel:
         timeout = float(self.config.get("connect_timeout", 10))
@@ -226,6 +227,7 @@ class TelnetSession(SwitchSession):
         self.channel = self._open_channel()
         self._login()
         self._read_until_prompt()
+        self._enter_privileged()
         self._log("\n### RECONNECTED (telnet)\n")
 
     def open_extra_sessions(self, count: int) -> list[SwitchSession]:

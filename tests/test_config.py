@@ -72,6 +72,13 @@ def test_docs_configuration_does_not_require_device_credentials(tmp_path: Path) 
             "denied_tokens",
         ),
         (
+            (
+                "device:\n  host: switch\n  username: user\n  enable: true\n"
+                "  enable_password_env: 'bad name'"
+            ),
+            "enable_password_env",
+        ),
+        (
             """device:
   host: switch
   username: user
@@ -91,6 +98,38 @@ def test_rejects_invalid_configuration(tmp_path: Path, content: str, message: st
 
     with pytest.raises(ConfigurationError, match=message):
         load_config(path)
+
+
+def test_enable_settings_are_loaded_and_serialised(tmp_path: Path) -> None:
+    path = tmp_path / "config.yml"
+    path.write_text(
+        """
+device:
+  host: switch.example.test
+  username: readonly
+  enable: true
+  enable_command: super
+  enable_password_env: LAB_ENABLE
+""",
+        encoding="utf-8",
+    )
+    device = load_config(path).device
+
+    assert device.enable is True
+    assert device.enable_command == "super"
+    data = device.to_session_dict()
+    assert data["enable"] is True
+    assert data["enable_password_env"] == "LAB_ENABLE"
+
+
+def test_enable_defaults_to_off(tmp_path: Path) -> None:
+    path = tmp_path / "config.yml"
+    path.write_text(
+        "device:\n  host: switch.example.test\n  username: readonly\n",
+        encoding="utf-8",
+    )
+
+    assert load_config(path).device.enable is False
 
 
 def test_version_commands_default_and_override(tmp_path: Path) -> None:

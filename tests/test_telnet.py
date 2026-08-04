@@ -173,6 +173,47 @@ def test_missing_password_env_is_a_clear_error(monkeypatch: pytest.MonkeyPatch) 
         session._login()
 
 
+# -- enable (privileged mode) ---------------------------------------------
+
+
+def test_connect_enters_enable_after_login(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SWITCH_PASSWORD", "s3cr3t-lab")
+    monkeypatch.setenv("ENABLE_SECRET", "priv")
+    sock = FakeSocket(b"Username: ")
+    state = {"enabled": False}
+
+    def device(s: FakeSocket, data: bytes) -> None:
+        text = data.decode("ascii", "ignore")
+        if text.startswith("root"):
+            s.inbound += b"root\r\nPassword: "
+        elif text.startswith("s3cr3t"):
+            s.inbound += b"\r\nSW1>"
+        elif text.startswith("enable"):
+            s.inbound += b"enable\r\nPassword: "
+        elif text.startswith("priv"):
+            state["enabled"] = True
+            s.inbound += b"\r\nSW1#"
+        elif text.strip() == "":  # a bare Enter redraws the current prompt
+            s.inbound += b"\r\nSW1#" if state["enabled"] else b"\r\nSW1>"
+
+    sock.on_send = device
+    session = TelnetSession(
+        {
+            "host": "switch",
+            "username": "root",
+            "read_timeout": 1,
+            "idle_timeout": 0.05,
+            "enable": True,
+        }
+    )
+    monkeypatch.setattr(session, "_open_channel", lambda: TelnetChannel(sock))
+
+    session._connect()
+
+    assert b"enable\r" in sock.sent
+    assert b"priv\r" in sock.sent  # the enable secret was supplied
+
+
 # -- config ---------------------------------------------------------------
 
 

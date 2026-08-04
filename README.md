@@ -74,6 +74,27 @@ cliradar audit --config config.yml
 cliradar audit --config config.yml --enter-modes
 ```
 
+## Transport and privileged mode
+
+`device.transport` selects how the CLI is reached: `ssh` (default, port 22) or
+`telnet` (default port 23). Many switches ship with SSH disabled and are managed
+over telnet until it is turned on, so either transport reaches the same crawl.
+For telnet there is no host key to pin; for SSH the host key is still verified.
+
+A Cisco-like login lands in an unprivileged view whose prompt ends in `>`, while
+the full command surface and the running configuration sit behind an `enable`
+step whose prompt ends in `#`. Set `device.enable: true` to raise the session to
+privileged mode right after login, so the crawl also sees privileged and
+configuration commands. The secret is read from the environment variable named
+by `device.enable_password_env` (leave it unset when the device grants `enable`
+without a password); a wrong secret is reported as a clear error rather than a
+silent under-scan.
+
+```bash
+export SWITCH_PASSWORD='...'
+export ENABLE_SECRET='...'   # only when device.enable is set and a secret is required
+```
+
 ## Configuration contexts
 
 Contextual help from the login context lists only that context's commands.

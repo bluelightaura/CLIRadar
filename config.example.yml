@@ -3,6 +3,21 @@ device:
   port: 22
   username: automation
   password_env: SWITCH_PASSWORD
+  # Transport to the CLI. 'ssh' (default, port 22) or 'telnet' (default port
+  # 23). Many switches ship with SSH disabled and are managed over telnet until
+  # it is turned on, so the crawler can reach either.
+  transport: ssh
+  # A Cisco-like login lands in an unprivileged view ('Switch>'); the full
+  # command surface and the running configuration sit behind an 'enable' step
+  # ('Switch#'). Turn this on to raise the session to privileged mode right
+  # after login, so the crawl sees privileged and configuration commands too.
+  enable: false
+  # The command that elevates. 'enable' on most platforms; some use 'super'.
+  enable_command: enable
+  # Environment variable holding the enable secret. Leave the variable unset
+  # when the device grants enable without a password; a wrong secret is
+  # reported as a clear error rather than a silent under-scan.
+  enable_password_env: ENABLE_SECRET
   prompt_pattern: '(?m)^[^\r\n]+[>#]\s*$'
   connect_timeout: 10
   read_timeout: 4
