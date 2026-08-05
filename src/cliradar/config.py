@@ -132,6 +132,23 @@ class DiscoveryConfig:
     # not - inside an interface view `speed <10-40000>` becomes `speed 10` on a
     # live port. Turn it on for a lab device to reach every last context.
     probe_invented_values: bool = False
+    # How a context-opening probe chooses what to type. 'safe' (default) probes
+    # only commands whose head verb enters a container the session can leave
+    # again; every other statement at a config prompt takes effect when typed,
+    # so it is reported instead of run. 'aggressive' probes every executable
+    # leaf - it reaches more modes but mutates the device, so it is for a lab.
+    probe_policy: str = "safe"
+    # The head verbs the safe policy treats as mode entries. Empty means the
+    # built-in set (navigator.DEFAULT_MODE_ENTRY_VERBS); list them here to add a
+    # platform's own container verb. Ignored under the aggressive policy.
+    mode_entry_verbs: tuple[str, ...] = ()
+    # In 'compare' mode every documented command is re-queried on the device to
+    # catch ones the blind crawl missed behind a parameter or context. A full
+    # vendor manual holds tens of thousands of them, and verifying all of them
+    # is thousands of round-trips that can run for many minutes (and hammer a
+    # fragile control plane), so the pass is capped: the surplus is reported as
+    # unverified rather than run. 0 lifts the cap and verifies every command.
+    compare_verify_limit: int = 2000
     # Read-only commands run once before the crawl so every report states which
     # firmware it describes. A catalog without that stamp cannot be compared
     # against a later run: identical command sets mean nothing across versions.
@@ -165,8 +182,19 @@ class DiscoveryConfig:
             )
         if not 0 <= self.verify_samples <= 1000:
             raise ConfigurationError("discovery.verify_samples must be between 0 and 1000")
+        if not 0 <= self.compare_verify_limit <= 1_000_000:
+            raise ConfigurationError(
+                "discovery.compare_verify_limit must be between 0 and 1000000"
+            )
         if self.parameter_policy not in {"skip", "explore"}:
             raise ConfigurationError("discovery.parameter_policy must be 'skip' or 'explore'")
+        if self.probe_policy not in {"safe", "aggressive"}:
+            raise ConfigurationError("discovery.probe_policy must be 'safe' or 'aggressive'")
+        for verb in self.mode_entry_verbs:
+            if not verb or not verb.isascii() or not verb.isprintable() or " " in verb:
+                raise ConfigurationError(
+                    "discovery.mode_entry_verbs must be single-word head verbs"
+                )
         for command in self.seed_commands:
             if not command or not command.isascii() or not command.isprintable() or "?" in command:
                 raise ConfigurationError("discovery.seed_commands contains an unsafe command")
@@ -299,6 +327,7 @@ def load_config(path: Path, *, require_device: bool = True) -> AppConfig:
         raise ConfigurationError("discovery.parameter_samples must be a YAML mapping")
     seed_commands = _sequence(discovery, "seed_commands")
     denied_tokens = _sequence(discovery, "denied_tokens")
+    mode_entry_verbs = _sequence(discovery, "mode_entry_verbs")
     version_commands = (
         _sequence(discovery, "version_commands")
         if "version_commands" in discovery
@@ -364,9 +393,12 @@ def load_config(path: Path, *, require_device: bool = True) -> AppConfig:
                 max_probes_per_context=int(discovery.get("max_probes_per_context", 200)),
                 deduplicate_subtrees=bool(discovery.get("deduplicate_subtrees", True)),
                 verify_samples=int(discovery.get("verify_samples", 25)),
+                compare_verify_limit=int(discovery.get("compare_verify_limit", 2000)),
                 probe_invented_values=bool(
                     discovery.get("probe_invented_values", False)
                 ),
+                probe_policy=str(discovery.get("probe_policy", "safe")),
+                mode_entry_verbs=tuple(str(item).lower() for item in mode_entry_verbs),
                 version_commands=tuple(str(item) for item in version_commands),
                 config_commands=tuple(str(item) for item in config_commands),
                 accept_undescribed_options=bool(

@@ -15,10 +15,15 @@ from cliradar.modes import (
     ContextLost,
     GuardedHelp,
     ModeScanReport,
+    _probe,
     sample_command,
     scan_modes,
 )
-from cliradar.navigator import ModeContext, ModeNavigator
+from cliradar.navigator import (
+    ModeContext,
+    ModeNavigator,
+    is_probe_allowed,
+)
 
 LIMITS = CrawlLimits(
     max_depth=4,
@@ -209,6 +214,78 @@ def test_a_dropped_channel_does_not_end_the_scan() -> None:
 
     assert device.reopens >= 1
     assert report.commands > 0
+
+
+# -- probe policy: which statements may be executed ----------------------
+
+
+def test_safe_policy_declines_configuration_statements() -> None:
+    # `logging` opens no context and takes effect when typed. The default safe
+    # policy must not probe it, while still reaching the container modes.
+    device = FakeDevice()
+
+    report = scan_modes(
+        navigator_for(device),
+        limits=LIMITS,
+        max_contexts=8,
+    )
+
+    assert "logging" not in device.executed_writes
+    names = {scan.context.name for scan in report.scans}
+    assert any(name.endswith("/vlan") for name in names)
+    assert any(name.endswith("/interface") for name in names)
+
+
+def test_aggressive_policy_probes_every_leaf() -> None:
+    # Turning the safe policy off (a lab opt-in) restores the behaviour that
+    # types every executable leaf, configuration statements included.
+    device = FakeDevice()
+
+    scan_modes(
+        navigator_for(device),
+        limits=LIMITS,
+        max_contexts=8,
+        mode_entry_verbs=None,
+        root_probe_allowlist=frozenset({"configure"}),
+    )
+
+    assert "logging" in device.executed_writes
+
+
+def test_flush_is_never_probed() -> None:
+    # `flush arp all` cleared a live switch's management ARP and reset the scan;
+    # it is a clear synonym and opens nothing, so it must stay unprobed.
+    assert not is_probe_allowed("flush arp all")
+    assert not is_probe_allowed("flush")
+
+
+def test_a_probe_that_resets_the_session_is_named_not_mislabelled() -> None:
+    # A command that kills the channel used to be recorded as a harmless
+    # "executed"; it is now attributed so the cause of a dead scan is visible.
+    device = FakeDevice(reset_on_command="boom")
+    navigator = navigator_for(device)
+    root = ModeContext("root", "#")
+
+    assert _probe(navigator, root, "logging").outcome == "executed"
+    assert _probe(navigator, root, "boom").outcome == "reset"
+
+
+def test_a_reset_probe_recovers_and_is_recorded() -> None:
+    # When a probe takes the session down, the scan rebuilds the channel,
+    # remembers the offending command, and does not die.
+    device = FakeDevice(reset_on_command="logging")
+
+    report = scan_modes(
+        navigator_for(device),
+        limits=LIMITS,
+        max_contexts=8,
+        mode_entry_verbs=None,
+        root_probe_allowlist=frozenset({"configure"}),
+    )
+
+    assert report.reset_by == "logging"
+    assert report.to_dict()["reset_by"] == "logging"
+    assert device.reopens >= 1
 
 
 def test_report_serialises_contexts_and_audit() -> None:

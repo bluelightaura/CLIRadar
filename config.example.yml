@@ -61,6 +61,24 @@ discovery:
   # minimum can apply 'speed 10' or 'mtu 68' to a live port. Turn this on only
   # against a lab device, to reach every last context.
   probe_invented_values: false
+  # How --enter-modes decides what to type when looking for a new context.
+  # 'safe' (default) probes only commands whose head verb enters a container the
+  # session can leave again (configure, interface, vlan, vrf, router, ...); any
+  # other statement at a config prompt takes effect the moment it is typed
+  # ('urpf enable', 'dhcp start', 'flush arp all'), so it is reported, not run.
+  # 'aggressive' probes every executable leaf: it reaches more modes but mutates
+  # the device, so use it only against a lab switch.
+  probe_policy: safe
+  # Extra head verbs the safe policy should treat as mode entries, for a
+  # platform whose container verb is not in the built-in set. Ignored when
+  # probe_policy is 'aggressive'.
+  mode_entry_verbs: []
+  # 'compare' mode re-queries every documented command on the device to catch
+  # ones the crawl missed. A full vendor manual holds tens of thousands, so the
+  # pass is capped here and the surplus is reported as unverified rather than
+  # run - a bound on run time and on load against a fragile control plane. Set
+  # to 0 to verify every documented command (slow on a large manual).
+  compare_verify_limit: 2000
   # How this platform's contextual help deviates from the strict reading. Both
   # trade a class of missed commands for a class of invented ones, so enable
   # each only after seeing the behaviour in a lab (see the parser audit notes).

@@ -29,6 +29,10 @@ DEFAULT_PROBE_DENYLIST: frozenset[str] = frozenset(
         "reboot", "reload", "restart", "halt", "shutdown", "poweroff",
         "erase", "format", "delete", "clear", "write", "copy", "save",
         "restore", "upgrade", "update", "boot", "install",
+        # `flush` empties a live table (`flush arp all` dropped the management
+        # ARP entry and reset the scanning session on a real lab hardware): it is a
+        # `clear` synonym and never opens a context, so it is pure risk to type.
+        "flush",
         # The same acts under other vendors' verbs. `reset` is the dangerous
         # one here: on a VRP-like CLI it is what `clear` is elsewhere, and
         # `reset saved-configuration` wipes the box. `commit`/`rollback`
@@ -55,6 +59,24 @@ DEFAULT_PROBE_DENYLIST: frozenset[str] = frozenset(
         # through a run, and every context found later became unreachable.
         "line", "username", "user", "login", "authentication", "aaa",
         "service", "management", "sshd", "telnetd", "ftpd", "tftpd",
+    }
+)
+
+
+# Head verbs that name a container the session steps *into* and can step back
+# out of - entering one is reversible, so a probe here costs nothing but the
+# `exit` that leaves. Everything else at a config prompt is a statement that
+# takes effect the moment it is typed (`urpf enable`, `dhcp start`,
+# `icmp echo-request deny`), so the safe policy probes only these and reports
+# the rest instead of executing them. Deliberately excludes ambiguous verbs
+# that are a mode on some platforms and an action on others (`dhcp`, `snmp`,
+# `ip`); an operator whose platform enters a mode there adds it in config.
+DEFAULT_MODE_ENTRY_VERBS: frozenset[str] = frozenset(
+    {
+        "configure", "config", "system-view",
+        "interface", "vlan", "vrf", "router", "bridge-domain",
+        "policy-map", "class-map", "class", "route-map",
+        "address-family", "key-chain", "template", "peer-group",
     }
 )
 

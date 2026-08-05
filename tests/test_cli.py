@@ -9,6 +9,7 @@ from fake_device import FakeDevice
 
 from cliradar.cli import (
     ExitCode,
+    _compare_verify_seeds,
     main,
     merge_context_scan,
     run,
@@ -16,6 +17,35 @@ from cliradar.cli import (
     write_html_report,
 )
 from cliradar.models import Catalog
+
+
+def test_compare_verify_seeds_caps_and_reports() -> None:
+    documented = {f"show {n:03d}": object() for n in range(100)}
+
+    seeds, skipped = _compare_verify_seeds(documented, limit=10)
+
+    assert len(seeds) == 10
+    assert skipped == 90
+    # Deterministic: the same first ten every run, so a re-scan is comparable.
+    assert seeds == sorted(documented)[:10]
+
+
+def test_compare_verify_seeds_zero_limit_verifies_everything() -> None:
+    documented = {f"show {n}": object() for n in range(5)}
+
+    seeds, skipped = _compare_verify_seeds(documented, limit=0)
+
+    assert skipped == 0
+    assert len(seeds) == 5
+
+
+def test_compare_verify_seeds_under_limit_keeps_all() -> None:
+    documented = {"show version": object(), "show ip": object()}
+
+    seeds, skipped = _compare_verify_seeds(documented, limit=2000)
+
+    assert skipped == 0
+    assert sorted(seeds) == ["show ip", "show version"]
 
 
 def test_writes_private_yaml_catalog(tmp_path: Path) -> None:
