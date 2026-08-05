@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from .crawler import CrawlLimits, CrawlProgress, CrawlResult, crawl
 from .models import Catalog
 from .navigator import (
+    DEFAULT_MODE_ENTRY_VERBS,
     DEFAULT_PROBE_DENYLIST,
     ModeContext,
     ModeNavigator,
@@ -120,7 +121,13 @@ class ContextScan:
 class ProbeRecord:
     command: str
     context: str
-    outcome: str  # "entered" | "executed" | "rejected"
+    # "entered"   - the prompt changed, a new context was found
+    # "executed"  - the command ran and the prompt did not change: on a live
+    #               device this is a configuration change, not a discovery
+    # "rejected"  - the device answered with an error and changed nothing
+    # "reset"     - the command took the session down (no prompt answered
+    #               afterwards); attributed rather than mislabelled "executed"
+    outcome: str
     fingerprint: str | None = None
 
 
@@ -131,6 +138,10 @@ class ModeScanReport:
     executed: list[str] = field(default_factory=list)
     reopens: int = 0
     unreachable: list[str] = field(default_factory=list)
+    # The probe that took the session down, if one did. Named so an operator
+    # can see what to avoid and, under the safe policy, that it should not have
+    # been typed at all.
+    reset_by: str | None = None
     probes_skipped: int = 0
     # Candidates that were never typed because a parameter had no configured
     # sample. Reported rather than filled in with an invented value: this is
@@ -180,6 +191,7 @@ class ModeScanReport:
             "executed_commands": list(self.executed),
             "channel_reopens": self.reopens,
             "unreachable_contexts": list(self.unreachable),
+            "reset_by": self.reset_by,
             "probes_skipped": self.probes_skipped,
             "probes_unsampled": self.probes_unsampled,
             "unsampled_parameters": sorted(self.unsampled_parameters),
@@ -245,6 +257,11 @@ def scan_modes(
     max_probes_per_context: int = 200,
     max_contexts: int = 64,
     root_probe_allowlist: frozenset[str] | None = None,
+    # The safe default: probe only commands whose head verb opens a container
+    # the session can step back out of, in every context, not just at the root.
+    # Set to None for the aggressive policy that probes every executable leaf -
+    # reaches more modes but executes the statements that are not modes.
+    mode_entry_verbs: frozenset[str] | None = DEFAULT_MODE_ENTRY_VERBS,
     on_context: object = None,
     on_progress: object = None,
     is_cancelled: object = None,
@@ -295,9 +312,16 @@ def scan_modes(
         if callable(on_context):
             on_context(scan)
 
+        # The safe policy narrows every context to mode-entry verbs; without it
+        # the old behaviour stands, constraining the root alone.
+        allowlist = (
+            mode_entry_verbs
+            if mode_entry_verbs is not None
+            else (root_probe_allowlist if context is root else None)
+        )
         candidates, unsampled = _probe_candidates(
             scan, denylist, hints, limits.parameter_samples,
-            root_probe_allowlist if context is root else None,
+            allowlist,
             probe_invented_values,
         )
         report.probes_unsampled += len(unsampled)
@@ -334,6 +358,18 @@ def scan_modes(
                 break
             record = _probe(navigator, context, command)
             report.probes.append(record)
+            if record.outcome == "reset":
+                # The probe took the session down. Typing the remaining
+                # candidates into a dead channel is what left a tail of useless
+                # `exit`s on real hardware, so rebuild once and, if the device
+                # is genuinely gone, stop the whole scan and remember the
+                # command that did it rather than retrying it.
+                report.reset_by = command
+                if not _ensure(navigator, context):
+                    report.unreachable.append(context.name)
+                    queue.clear()
+                    break
+                continue
             if record.outcome != "entered" or record.fingerprint is None:
                 continue
 
@@ -402,7 +438,13 @@ def _probe(navigator: ModeNavigator, context: ModeContext, command: str) -> Prob
     output, fingerprint = navigator.run(command)
     if fingerprint is None:
         fingerprint = navigator.confirm_fingerprint()
-    if fingerprint and fingerprint != context.fingerprint:
+    if fingerprint is None:
+        # The command was sent and nothing answers the prompt afterwards: the
+        # probe took the session down rather than doing nothing. Recording this
+        # as "executed" would hide the cause of a dead scan among the harmless
+        # ones; naming it lets the caller recover and quarantine the command.
+        return ProbeRecord(command, context.name, "reset")
+    if fingerprint != context.fingerprint:
         return ProbeRecord(command, context.name, "entered", fingerprint)
     if any(ERROR_RE.match(line.strip()) for line in output.splitlines()):
         return ProbeRecord(command, context.name, "rejected")

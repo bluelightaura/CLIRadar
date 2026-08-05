@@ -189,6 +189,24 @@ class ScanOutcome:
     complete: bool
     config_path: Path | None = None
     config_summary: dict[str, object] | None = None
+    # Documented commands left unverified against the device because the compare
+    # budget was reached; reported so "missing" is not confused with "unchecked".
+    verify_skipped: int = 0
+
+
+def _compare_verify_seeds(
+    documented: dict[str, object], limit: int
+) -> tuple[list[str], int]:
+    """The documented commands to re-check on the device, and how many were cut.
+
+    Verifying every command in a full vendor manual is thousands of round-trips
+    that can run for many minutes, so the pass is bounded. Sorting keeps the run
+    deterministic; a limit of 0 means verify everything.
+    """
+    ordered = sorted(documented)
+    if limit and len(ordered) > limit:
+        return ordered[:limit], len(ordered) - limit
+    return ordered, 0
 
 
 def _view_prefixes(mode_report: object) -> tuple[tuple[str, ...], ...]:
@@ -282,7 +300,11 @@ def build_catalog(
         verify_samples=config.discovery.verify_samples,
     )
     seeds = list(config.discovery.seed_commands)
-    verify_seeds = list(documented) if mode == "compare" else []
+    verify_seeds, verify_skipped = (
+        _compare_verify_seeds(documented, config.discovery.compare_verify_limit)
+        if mode == "compare"
+        else ([], 0)
+    )
     mode_report = None
     config_command, config_output = "", ""
     try:
@@ -300,7 +322,18 @@ def build_catalog(
                 )
             if config.discovery.enter_modes:
                 from .modes import scan_modes
-                from .navigator import ModeNavigator
+                from .navigator import DEFAULT_MODE_ENTRY_VERBS, ModeNavigator
+
+                # The safe policy restricts probes to reversible mode entries;
+                # the aggressive policy (a lab opt-in) lifts that restriction.
+                mode_entry_verbs = (
+                    None
+                    if config.discovery.probe_policy == "aggressive"
+                    else (
+                        frozenset(config.discovery.mode_entry_verbs)
+                        or DEFAULT_MODE_ENTRY_VERBS
+                    )
+                )
 
                 workers = [
                     ModeNavigator(terminal=sibling)
@@ -344,6 +377,7 @@ def build_catalog(
                     max_contexts=config.discovery.max_contexts,
                     max_probes_per_context=config.discovery.max_probes_per_context,
                     probe_invented_values=config.discovery.probe_invented_values,
+                    mode_entry_verbs=mode_entry_verbs,
                     workers=workers,
                     on_progress=on_progress,
                     on_context=persist,
@@ -411,6 +445,8 @@ def build_catalog(
         )
 
     catalog.scan = crawl_result.to_dict()
+    if mode == "compare":
+        catalog.scan["compare_verify_skipped"] = verify_skipped
     write_catalog(catalog, destination)
     write_exports(catalog, config)
     html_destination = config.output.html_report if mode == "compare" else None
@@ -424,6 +460,7 @@ def build_catalog(
         crawl_result.complete,
         config_path=written_config,
         config_summary=catalog.configuration or None,
+        verify_skipped=verify_skipped,
     )
 
 
@@ -582,6 +619,13 @@ def run(argv: list[str] | None = None) -> int:
             print(f"Wrote HTML report to {outcome.html_path}")
         print(f"Wrote command tree to {config.output.tree_catalog}")
         print(f"Wrote human-readable commands to {config.output.human_catalog}")
+        if outcome.verify_skipped:
+            print(
+                f"note: {outcome.verify_skipped} documented commands were not"
+                " verified against the device (compare_verify_limit reached);"
+                " they are reported as unverified, not confirmed missing",
+                file=sys.stderr,
+            )
         if outcome.config_path is not None and outcome.config_summary:
             summary = outcome.config_summary
             print(
@@ -591,11 +635,23 @@ def run(argv: list[str] | None = None) -> int:
             )
             missing = int(summary["unmatched"])
             if missing:
-                print(
-                    f"warning: {missing} configured lines are not in the catalog;"
-                    " see 'configuration.missing_from_catalog'",
-                    file=sys.stderr,
-                )
+                # Without --enter-modes the crawl only sees the exec view, while
+                # a running configuration is written in configuration-mode
+                # syntax - so the lines read as missing because those contexts
+                # were never scanned, not because the surface is incomplete.
+                if not config.discovery.enter_modes:
+                    print(
+                        f"warning: {missing} configured lines are not explained;"
+                        " the configuration contexts were not scanned - run with"
+                        " --enter-modes to catalogue them",
+                        file=sys.stderr,
+                    )
+                else:
+                    print(
+                        f"warning: {missing} configured lines are not in the catalog;"
+                        " see 'configuration.missing_from_catalog'",
+                        file=sys.stderr,
+                    )
     if not outcome.complete:
         print(
             "warning: scan is incomplete; inspect the 'scan' section in the catalog",

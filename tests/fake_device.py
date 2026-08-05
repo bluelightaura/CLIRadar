@@ -9,7 +9,12 @@ from __future__ import annotations
 
 HELP_BY_MODE = {
     "": "  configure  Enter configuration mode\n  show  Display information\n  <cr>\n",
-    "config": "  vlan  VLAN view\n  interface  Interface view\n  hostname  Set hostname\n",
+    # `logging` is a parameter-free statement: it takes effect the moment it is
+    # typed and opens no context - the shape the safe probe policy must decline.
+    "config": (
+        "  vlan  VLAN view\n  interface  Interface view\n"
+        "  hostname  Set hostname\n  logging  Enable logging\n"
+    ),
     "config-if": "  ip  Interface address\n  <cr>\n",
 }
 # Contextual help for prefixes inside a mode. Entering a mode takes an
@@ -35,6 +40,7 @@ class FakeDevice:
         drift_after: int | None = None,
         interrupt_exits_mode: bool = True,
         dead_channel_after: int | None = None,
+        reset_on_command: str | None = None,
     ) -> None:
         self.hostname = hostname
         self.banner = banner
@@ -51,6 +57,9 @@ class FakeDevice:
         # The device hangs up: every operation raises until the channel is
         # rebuilt, the way a dropped SSH session behaves.
         self.dead_channel_after = dead_channel_after
+        # A specific command that takes the session down when executed, the way
+        # `flush arp all` reset a live switch by clearing its management ARP.
+        self.reset_on_command = reset_on_command
         self.stack: list[str] = []
         self.commands: list[str] = []
         self.queries: list[str] = []
@@ -106,6 +115,11 @@ class FakeDevice:
         self._check_channel()
         if self.closed:
             return ""
+        if command == self.reset_on_command:
+            self.executed_writes.append(command)
+            self.stack.clear()
+            self.closed = True
+            raise OSError("Connection reset by peer")
         if command in self.confirm_commands:
             # The scanner must decline; the device stays where it was.
             return f"{command}\nAre you sure? (y/n)"
