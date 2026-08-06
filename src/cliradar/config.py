@@ -112,6 +112,12 @@ class DeviceConfig:
 class DiscoveryConfig:
     max_depth: int = 32
     max_queries: int = 100_000
+    # A wall-clock ceiling for the whole run, in seconds. max_queries bounds each
+    # context on its own, so a graph with many contexts has no total bound and a
+    # full crawl can run for many minutes and keep loading a fragile device. This
+    # is the one guarantee that a run always ends: when the deadline passes the
+    # scan stops cleanly and reports itself incomplete. 0 means no time limit.
+    max_runtime: float = 0.0
     seed_commands: tuple[str, ...] = ()
     denied_tokens: tuple[str, ...] = DEFAULT_DENIED_TOKENS
     parameter_policy: str = "explore"
@@ -172,6 +178,8 @@ class DiscoveryConfig:
             raise ConfigurationError("discovery.max_depth must be between 1 and 64")
         if not 1 <= self.max_queries <= 1_000_000:
             raise ConfigurationError("discovery.max_queries must be between 1 and 1000000")
+        if not 0 <= self.max_runtime <= 86_400:
+            raise ConfigurationError("discovery.max_runtime must be between 0 and 86400")
         if not 1 <= self.parallel_channels <= 16:
             raise ConfigurationError("discovery.parallel_channels must be between 1 and 16")
         if not 1 <= self.max_contexts <= 512:
@@ -377,6 +385,7 @@ def load_config(path: Path, *, require_device: bool = True) -> AppConfig:
             discovery=DiscoveryConfig(
                 max_depth=int(discovery.get("max_depth", 32)),
                 max_queries=int(discovery.get("max_queries", 100_000)),
+                max_runtime=float(discovery.get("max_runtime", 0)),
                 seed_commands=tuple(str(item) for item in seed_commands),
                 denied_tokens=tuple(
                     str(item).lower()

@@ -72,6 +72,14 @@ def test_docs_configuration_does_not_require_device_credentials(tmp_path: Path) 
             "denied_tokens",
         ),
         (
+            "device:\n  host: switch\n  username: user\ndiscovery:\n  max_runtime: -1",
+            "max_runtime",
+        ),
+        (
+            "device:\n  host: switch\n  username: user\ndiscovery:\n  max_runtime: 99999",
+            "max_runtime",
+        ),
+        (
             (
                 "device:\n  host: switch\n  username: user\n  enable: true\n"
                 "  enable_password_env: 'bad name'"

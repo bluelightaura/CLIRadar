@@ -30,6 +30,12 @@ device:
 discovery:
   max_depth: 32
   max_queries: 100000
+  # A wall-clock ceiling for the whole run, in seconds. max_queries bounds each
+  # context on its own, so a device with many contexts has no total limit and a
+  # full crawl can run for many minutes and keep loading a fragile box. This is
+  # the guarantee a run always ends: at the deadline the scan stops cleanly and
+  # reports itself incomplete. 0 means no time limit.
+  max_runtime: 0
   # Extra shell channels over the same SSH connection speed up the crawl.
   # Devices with a low vty limit silently fall back to fewer channels.
   parallel_channels: 1

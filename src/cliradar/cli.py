@@ -209,6 +209,23 @@ def _compare_verify_seeds(
     return ordered, 0
 
 
+def _config_unexplained(catalog: Catalog) -> int:
+    """Configured lines the crawled catalog could not explain.
+
+    The device's own running configuration is evidence the crawl does not
+    control: a line the box is actually running, that its `?` help never
+    produced, proves the command surface is incomplete regardless of what the
+    help claimed. This is what keeps completeness independent of trusting the
+    firmware - a buggy `?` cannot report a surface as whole while the device is
+    configured with commands it never mentioned.
+    """
+    configuration = catalog.configuration or {}
+    try:
+        return int(configuration.get("unmatched", 0))
+    except (TypeError, ValueError):
+        return 0
+
+
 def _view_prefixes(mode_report: object) -> tuple[tuple[str, ...], ...]:
     """The entry paths of every context the scan actually stood in.
 
@@ -305,6 +322,19 @@ def build_catalog(
         if mode == "compare"
         else ([], 0)
     )
+    # One wall-clock ceiling for the whole run, checked between queries through
+    # the crawler's existing cancellation hook - no separate machinery. When it
+    # trips the scan unwinds cleanly and reports itself incomplete, so a run can
+    # neither hang nor keep hammering the device past the budget.
+    run_deadline = (
+        time.monotonic() + config.discovery.max_runtime
+        if config.discovery.max_runtime
+        else None
+    )
+
+    def budget_reached() -> bool:
+        return run_deadline is not None and time.monotonic() >= run_deadline
+
     mode_report = None
     config_command, config_output = "", ""
     try:
@@ -381,6 +411,7 @@ def build_catalog(
                     workers=workers,
                     on_progress=on_progress,
                     on_context=persist,
+                    is_cancelled=budget_reached,
                 )
                 crawl_result = None
             else:
@@ -396,6 +427,7 @@ def build_catalog(
                     limits,
                     include_root=True,
                     on_progress=on_progress,
+                    is_cancelled=budget_reached,
                     extra_query_helps=extra_query_helps,
                     verify_seeds=verify_seeds,
                 )
@@ -403,11 +435,13 @@ def build_catalog(
         raise DeviceConnectionError(f"device session failed: {error}") from error
 
     written_config: Path | None = None
+    config_unexplained = 0
     if config_output:
         apply_config_scan(
             catalog, config, config_command, config_output, _view_prefixes(mode_report)
         )
         written_config = config.output.config_tree
+        config_unexplained = _config_unexplained(catalog)
 
     if mode_report is not None:
         if on_progress:
@@ -422,11 +456,17 @@ def build_catalog(
                 )
             )
         queries = sum(scan.result.queries for scan in mode_report.scans)
-        complete = all(scan.result.complete for scan in mode_report.scans)
+        # Completeness is fail-closed against the running configuration: the
+        # crawl may believe it saw everything, but a configured line it never
+        # produced proves otherwise, so the device's own state has the last word.
+        complete = all(scan.result.complete for scan in mode_report.scans) and (
+            config_unexplained == 0
+        )
         catalog.scan = {
             "complete": complete,
             "queries": queries,
             "source": "context-graph",
+            "config_unexplained": config_unexplained,
             **mode_report.to_dict(),
         }
         write_catalog(catalog, destination)
@@ -445,8 +485,14 @@ def build_catalog(
         )
 
     catalog.scan = crawl_result.to_dict()
+    catalog.scan["config_unexplained"] = config_unexplained
     if mode == "compare":
         catalog.scan["compare_verify_skipped"] = verify_skipped
+    # The device's running configuration overrides an optimistic crawl: a line
+    # it could not explain proves the surface is incomplete, so completeness
+    # never rests on the firmware's word alone.
+    complete = crawl_result.complete and config_unexplained == 0
+    catalog.scan["complete"] = complete
     write_catalog(catalog, destination)
     write_exports(catalog, config)
     html_destination = config.output.html_report if mode == "compare" else None
@@ -457,7 +503,7 @@ def build_catalog(
         html_destination,
         len(catalog.commands),
         crawl_result.queries,
-        crawl_result.complete,
+        complete,
         config_path=written_config,
         config_summary=catalog.configuration or None,
         verify_skipped=verify_skipped,

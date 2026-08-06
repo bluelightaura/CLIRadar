@@ -10,6 +10,7 @@ from fake_device import FakeDevice
 from cliradar.cli import (
     ExitCode,
     _compare_verify_seeds,
+    _config_unexplained,
     main,
     merge_context_scan,
     run,
@@ -17,6 +18,28 @@ from cliradar.cli import (
     write_html_report,
 )
 from cliradar.models import Catalog
+
+
+def test_config_unexplained_counts_lines_the_catalog_cannot_explain() -> None:
+    # A configured line the crawl never produced is independent evidence the
+    # command surface is incomplete, whatever the firmware's `?` claimed.
+    catalog = Catalog(device={"identity": "redacted"})
+    catalog.configuration = {"lines": 8, "matched": 5, "unmatched": 3}
+
+    assert _config_unexplained(catalog) == 3
+
+
+def test_config_unexplained_is_zero_without_a_captured_configuration() -> None:
+    # No running configuration means no independent evidence either way; the
+    # crawl's own signals decide completeness, so this must not force incomplete.
+    assert _config_unexplained(Catalog(device={"identity": "redacted"})) == 0
+
+
+def test_config_unexplained_tolerates_a_malformed_count() -> None:
+    catalog = Catalog(device={"identity": "redacted"})
+    catalog.configuration = {"unmatched": "not-a-number"}
+
+    assert _config_unexplained(catalog) == 0
 
 
 def test_compare_verify_seeds_caps_and_reports() -> None:
