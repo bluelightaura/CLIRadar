@@ -30,8 +30,8 @@ DEFAULT_PROBE_DENYLIST: frozenset[str] = frozenset(
         "erase", "format", "delete", "clear", "write", "copy", "save",
         "restore", "upgrade", "update", "boot", "install",
         # `flush` empties a live table (`flush arp all` dropped the management
-        # ARP entry and reset the scanning session on a real lab hardware): it is a
-        # `clear` synonym and never opens a context, so it is pure risk to type.
+        # ARP entry and reset the scanning session on real lab hardware): it is
+        # a `clear` synonym and never opens a context, so it is pure risk to type.
         "flush",
         # The same acts under other vendors' verbs. `reset` is the dangerous
         # one here: on a VRP-like CLI it is what `clear` is elsewhere, and
