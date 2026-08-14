@@ -328,13 +328,13 @@ def _add_command(
         entry.description = description
 
 
-def scan_documentation(root: Path) -> dict[str, CommandEntry]:
+def scan_documentation(root: Path, on_progress=None) -> dict[str, CommandEntry]:
     commands: dict[str, CommandEntry] = {}
     if not root.exists():
         return commands
 
     candidates = [root] if root.is_file() else root.rglob("*")
-    paths = (
+    paths = sorted(
         item
         for item in candidates
         if item.is_file()
@@ -342,7 +342,12 @@ def scan_documentation(root: Path) -> dict[str, CommandEntry]:
         and item.suffix.lower() in SUPPORTED_SUFFIXES
         and item.stat().st_size <= MAX_DOCUMENT_BYTES
     )
-    for path in sorted(paths):
+    total = len(paths)
+    for index, path in enumerate(paths):
+        # Reading a folder of manuals is otherwise silent; a per-file tick lets
+        # the caller draw "reading file k/N" so a docs run visibly progresses.
+        if callable(on_progress):
+            on_progress(index, total, path.name)
         text = path.read_text(encoding="utf-8", errors="replace")
         if path.suffix.lower() == ".txt" and COMPACT_REFERENCE_MARKER_RE.search(text):
             continue
@@ -372,4 +377,6 @@ def scan_documentation(root: Path) -> dict[str, CommandEntry]:
                 continue
             for command in _expand_syntax(candidate[0]):
                 _add_command(commands, command, candidate[1], path)
+    if callable(on_progress) and total:
+        on_progress(total, total, "")  # a final full tick closes the bar
     return commands

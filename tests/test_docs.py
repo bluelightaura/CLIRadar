@@ -5,6 +5,23 @@ import pytest
 from cliradar.docs import MAX_DOCUMENT_BYTES, scan_documentation
 
 
+def test_scan_documentation_reports_per_file_progress(tmp_path: Path) -> None:
+    (tmp_path / "a.txt").write_text("interface GigabitEthernet0/1\n")
+    (tmp_path / "b.md").write_text("```\nshow version\n```\n")
+    ticks: list[tuple[int, int, str]] = []
+    scan_documentation(tmp_path, on_progress=lambda i, t, n: ticks.append((i, t, n)))
+    # One tick per file, then a final full tick that closes the bar.
+    assert ticks[0] == (0, 2, "a.txt")
+    assert ticks[1] == (1, 2, "b.md")
+    assert ticks[-1] == (2, 2, "")
+
+
+def test_scan_documentation_progress_is_optional(tmp_path: Path) -> None:
+    (tmp_path / "a.txt").write_text("show version\n")
+    # No callback must not raise and must still return commands.
+    assert scan_documentation(tmp_path)
+
+
 def test_extracts_commands_from_fences_and_tables(tmp_path: Path) -> None:
     (tmp_path / "guide.md").write_text(
         """
