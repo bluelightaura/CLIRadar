@@ -124,6 +124,56 @@ def test_scan_discovers_nested_contexts_without_being_told_about_them() -> None:
     assert any(name.endswith("/interface") for name in names)
 
 
+def test_scoped_scan_starts_at_a_chosen_context_and_stays_in_its_subtree() -> None:
+    # The map browser hands back a context rebuilt from a prior audit; a scoped
+    # run must begin there, not at the root, and still discover what that
+    # context opens beneath it.
+    device = FakeDevice()
+    start = ModeContext(
+        name="root/configure",
+        fingerprint="(config)#",
+        entry_path=("configure",),
+        parent="#",
+    )
+    report = scan_modes(
+        navigator_for(device),
+        limits=LIMITS,
+        max_contexts=10,
+        start_contexts=[start],
+    )
+
+    names = {scan.context.name for scan in report.scans}
+    assert "root" not in names  # the root itself was skipped
+    assert "root/configure" in names  # the chosen context was scanned
+    # Its subtree is still found by probing from inside it.
+    assert any(name.endswith("/vlan") for name in names)
+    assert any(name.endswith("/interface") for name in names)
+
+
+def test_shallow_scoped_scan_does_not_walk_into_opened_modes() -> None:
+    # "Run this block, not the tree below it": the config context is scanned,
+    # but the vlan/interface modes it opens are recorded as probes only.
+    device = FakeDevice()
+    start = ModeContext(
+        name="root/configure",
+        fingerprint="(config)#",
+        entry_path=("configure",),
+        parent="#",
+    )
+    report = scan_modes(
+        navigator_for(device),
+        limits=LIMITS,
+        max_contexts=10,
+        start_contexts=[start],
+        descend=False,
+    )
+
+    names = {scan.context.name for scan in report.scans}
+    assert names == {"root/configure"}  # nothing below it was scanned
+    # The modes it opens are still discovered, just not entered.
+    assert any(probe.outcome == "entered" for probe in report.probes)
+
+
 def test_scan_records_every_pressed_enter() -> None:
     device = FakeDevice()
     report = scan_modes(

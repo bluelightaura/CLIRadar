@@ -265,6 +265,8 @@ def scan_modes(
     on_context: object = None,
     on_progress: object = None,
     is_cancelled: object = None,
+    start_contexts: Sequence[ModeContext] | None = None,
+    descend: bool = True,
 ) -> ModeScanReport:
     """Walk the CLI as a graph of contexts, breadth first.
 
@@ -272,12 +274,27 @@ def scan_modes(
     its executable commands are probed to find the contexts they open. A probe
     that changes the prompt is an entry; anything else is recorded and left
     alone.
+
+    ``start_contexts`` scopes the walk: given one or more contexts (rebuilt from
+    a prior scan's map), the breadth-first walk begins there instead of at the
+    root, so only those contexts and the subtree they open are scanned. The root
+    is still bound so entry paths can be replayed and contexts stepped back out
+    of; it is simply not itself enqueued.
+
+    ``descend`` False scans only the contexts it is given and does not follow the
+    modes they open - "this block, not the tree below it", the shallow run the
+    exec-only choice needs. The children are still recorded as probes, so the
+    map keeps learning the shape even when this run declines to walk into it.
     """
     report = ModeScanReport()
     root_fingerprint = navigator.bind_root()
     root = ModeContext("root", root_fingerprint)
-    queue: list[ModeContext] = [root]
-    seen: set[tuple[str, str]] = {root.key}
+    if start_contexts:
+        queue: list[ModeContext] = list(start_contexts)
+        seen: set[tuple[str, str]] = {context.key for context in start_contexts}
+    else:
+        queue = [root]
+        seen = {root.key}
 
     cancelled = is_cancelled if callable(is_cancelled) else None
     while queue and len(report.scans) < max_contexts:
@@ -380,6 +397,12 @@ def scan_modes(
                 parent=context.fingerprint,
             )
             navigator.leave(context.fingerprint)
+            # A shallow scoped run records what each probe opens but does not
+            # enqueue it: the operator asked for this block alone, not the modes
+            # below it. The entry is still in report.probes, so the map still
+            # learns the child exists.
+            if not descend:
+                continue
             if child.key in seen or len(seen) >= max_contexts:
                 continue
             seen.add(child.key)
