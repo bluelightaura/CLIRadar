@@ -256,12 +256,17 @@ def apply_config_scan(
     """Match the running configuration against the catalog and save both."""
     from .runconfig import correlate, parse_config, redact_secrets, render_config_yaml
 
-    lines = parse_config(redact_secrets(output), command)
-    coverage = correlate(lines, catalog, command=command, view_prefixes=view_prefixes)
+    # Correlation must see the real tokens: a configured secret redacted before
+    # matching would never reach the catalog and would misreport the surface as
+    # incomplete. Only the copy written to disk is redacted, and both parses walk
+    # the same structure, so their line numbers line up for the status overlay.
+    real_lines = parse_config(output, command)
+    coverage = correlate(real_lines, catalog, command=command, view_prefixes=view_prefixes)
     catalog.configuration = coverage.to_dict()
+    safe_lines = parse_config(redact_secrets(output), command)
     _write_private_text(
         config.output.config_tree,
-        render_config_yaml(lines, coverage),
+        render_config_yaml(safe_lines, coverage),
         "a configuration tree",
     )
 
@@ -272,6 +277,9 @@ def build_catalog(
     docs_path: Path,
     on_progress: Callable[[CrawlProgress], None] | None = None,
     on_context: Callable[[object], None] | None = None,
+    is_cancelled: Callable[[], bool] | None = None,
+    run_target: object = None,
+    discover: bool = False,
 ) -> ScanOutcome:
     if mode not in {"compare", "audit", "docs"}:
         raise ConfigurationError("mode must be 'compare', 'audit', or 'docs'")
@@ -280,9 +288,34 @@ def build_catalog(
 
     # Never persist target or workstation identifiers in generated artifacts.
     catalog = Catalog(device={"identity": "redacted"}, mode=mode)
-    documented = scan_documentation(docs_path) if mode in {"compare", "docs"} else {}
+
+    def _docs_tick(index: int, total: int, name: str) -> None:
+        if on_progress:
+            on_progress(
+                CrawlProgress(
+                    queries=index,
+                    max_queries=total,
+                    prefix=name,
+                    commands=0,
+                    pending=max(0, total - index),
+                    stage="docs",
+                )
+            )
+
+    documented = (
+        scan_documentation(docs_path, on_progress=_docs_tick)
+        if mode in {"compare", "docs"}
+        else {}
+    )
     catalog.commands.update(documented)
     destination = config.output.catalog_for(mode)
+    if getattr(run_target, "starts", None):
+        # A scoped re-scan covers only the chosen block; writing it over the
+        # full catalog would erase every context it never visited. Keep it in a
+        # sibling file so the master map the browser reads stays whole.
+        destination = destination.with_name(
+            f"{destination.stem}.scoped{destination.suffix}"
+        )
 
     if mode == "docs":
         catalog.scan = {
@@ -316,6 +349,13 @@ def build_catalog(
         deduplicate_subtrees=config.discovery.deduplicate_subtrees,
         verify_samples=config.discovery.verify_samples,
     )
+    if discover:
+        # A discovery pass maps the mode structure, not every command: a shallow
+        # crawl still reaches the mode-entry verbs (vrf, mlag, ...) that open the
+        # blocks, but skips the exhaustive per-parameter walk the deep parse of a
+        # chosen block does later. This is what makes "Audit" land in the tree
+        # fast instead of catal0guing the whole device first.
+        limits = replace(limits, max_depth=min(2, limits.max_depth))
     seeds = list(config.discovery.seed_commands)
     verify_seeds, verify_skipped = (
         _compare_verify_seeds(documented, config.discovery.compare_verify_limit)
@@ -325,7 +365,9 @@ def build_catalog(
     # One wall-clock ceiling for the whole run, checked between queries through
     # the crawler's existing cancellation hook - no separate machinery. When it
     # trips the scan unwinds cleanly and reports itself incomplete, so a run can
-    # neither hang nor keep hammering the device past the budget.
+    # neither hang nor keep hammering the device past the budget. The same hook
+    # carries an interactive cancel (Ctrl-C from the menu loop): both just ask
+    # the crawl to stop at the next checkpoint and keep the partial catalog.
     run_deadline = (
         time.monotonic() + config.discovery.max_runtime
         if config.discovery.max_runtime
@@ -333,6 +375,8 @@ def build_catalog(
     )
 
     def budget_reached() -> bool:
+        if is_cancelled is not None and is_cancelled():
+            return True
         return run_deadline is not None and time.monotonic() >= run_deadline
 
     mode_report = None
@@ -352,7 +396,29 @@ def build_catalog(
                 )
             if config.discovery.enter_modes:
                 from .modes import scan_modes
-                from .navigator import DEFAULT_MODE_ENTRY_VERBS, ModeNavigator
+                from .navigator import (
+                    DEFAULT_MODE_ENTRY_VERBS,
+                    ModeContext,
+                    ModeNavigator,
+                )
+
+                # A block chosen in the map browser scopes the walk: rebuild the
+                # contexts it named and begin there, optionally without following
+                # the modes they open (the exec-only choice).
+                start_contexts = None
+                descend = True
+                starts = getattr(run_target, "starts", None)
+                if starts:
+                    start_contexts = [
+                        ModeContext(
+                            name=ref.name,
+                            fingerprint=ref.fingerprint,
+                            entry_path=tuple(ref.entry_path),
+                        )
+                        for ref in starts
+                        if ref.fingerprint
+                    ]
+                    descend = bool(getattr(run_target, "descend", True))
 
                 # The safe policy restricts probes to reversible mode entries;
                 # the aggressive policy (a lab opt-in) lifts that restriction.
@@ -412,6 +478,8 @@ def build_catalog(
                     on_progress=on_progress,
                     on_context=persist,
                     is_cancelled=budget_reached,
+                    start_contexts=start_contexts,
+                    descend=descend,
                 )
                 crawl_result = None
             else:
@@ -553,14 +621,86 @@ def create_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def run(argv: list[str] | None = None) -> int:
-    parser = create_parser()
-    args = parser.parse_args(argv)
-    if args.mode is None and not args.check_config:
-        parser.print_usage(sys.stderr)
-        print("cliradar: error: choose mode: compare, audit, or docs", file=sys.stderr)
-        return ExitCode.USAGE
+def _menu_loop(args: argparse.Namespace) -> int:
+    """Drive the interactive launcher in a loop: pick, run, return, repeat.
 
+    Reached only when cliradar is started with no mode. Each pick runs to
+    completion - or is cancelled with Ctrl-C, which stops the scan cleanly and
+    keeps the partial catalog - and then the menu is drawn again, so several
+    modes run in one sitting without relaunching. Quitting the menu ('q')
+    leaves with the last run's exit code. A non-interactive invocation gets None
+    on the very first pass and falls back to the usual usage error, so pipes and
+    scripts behave exactly as before.
+    """
+    from .menu import interactive_menu, prompt_return
+
+    ran = False
+    last = ExitCode.OK
+    while True:
+        selection = interactive_menu(args.config, __version__, args.docs)
+        if selection is None:
+            if ran:
+                return last
+            create_parser().print_usage(sys.stderr)
+            print(
+                "cliradar: error: choose mode: compare, audit, or docs",
+                file=sys.stderr,
+            )
+            return ExitCode.USAGE
+        chosen = argparse.Namespace(**vars(args))
+        chosen.mode = selection.mode
+        chosen.check_config = args.check_config or selection.check_config
+        chosen.enter_modes = args.enter_modes or selection.enter_modes
+        chosen.run_target = selection.run_target
+        chosen.discover = selection.discover
+        if selection.config is not None:
+            chosen.config = selection.config
+        last = _execute(chosen, cancellable=True)
+        ran = True
+        # A discovery audit maps the mode structure, then hands the operator the
+        # tree to parse blocks from - single block or the whole run - looping
+        # back to the tree after each until they step out.
+        if selection.browse_after and last == ExitCode.OK:
+            _browse_and_parse(chosen)
+        if not prompt_return():
+            return last
+
+
+def _browse_and_parse(base_args: argparse.Namespace) -> None:
+    """Walk the discovered map and deep-parse whatever block the operator picks.
+
+    Loops: draw the tree, wait for a choice, run a scoped parse of that block (or
+    the whole side), then draw the tree again. Stepping out of the tree ('q')
+    returns to the launcher. The tree reads the discovery map; each deep parse is
+    written beside it, so the structure the operator navigates stays stable.
+    """
+    from .menu import browse_map
+
+    try:
+        config = load_config(base_args.config, require_device=True)
+    except CLIRadarError:
+        return
+    catalog = config.output.device_catalog
+    transport = config.device.transport
+    while True:
+        target = browse_map(catalog, __version__, transport)
+        if target is None:
+            return
+        run_args = argparse.Namespace(**vars(base_args))
+        run_args.run_target = target
+        run_args.discover = False  # a chosen block is parsed in full
+        run_args.mode = "audit"
+        _execute(run_args, cancellable=True)
+
+
+def run(argv: list[str] | None = None) -> int:
+    args = create_parser().parse_args(argv)
+    if args.mode is None and not args.check_config:
+        return _menu_loop(args)
+    return _execute(args)
+
+
+def _execute(args: argparse.Namespace, cancellable: bool = False) -> int:
     progress_shown = False
     # Each stage keeps its own clock: the ETA is meaningless when a fresh
     # context's few queries are divided by the whole run's elapsed time.
@@ -570,7 +710,18 @@ def run(argv: list[str] | None = None) -> int:
         "crawl": "запросов",
         "verify": "проверка копий",
         "probe": "пробы режимов",
+        "docs": "читаю доки",
     }
+
+    # When a scoped run covers several chosen blocks, number them as they finish
+    # ("блок 3/7") so a whole-run parse reads as sequential progress, not silence.
+    _run_target = getattr(args, "run_target", None)
+    _planned_blocks = {
+        getattr(ref, "name", "")
+        for ref in (getattr(_run_target, "starts", None) or ())
+    }
+    _block_total = len(_planned_blocks)
+    _blocks_done: set[str] = set()
 
     def show_progress(progress: CrawlProgress) -> None:
         nonlocal progress_shown, line_width
@@ -592,7 +743,11 @@ def run(argv: list[str] | None = None) -> int:
             done = progress.queries - stage_state["origin"]
             rate = done / elapsed if elapsed > 0 else 0.0
             label = stage_labels.get(progress.stage, progress.stage)
-            current = f" | сейчас: {progress.prefix[:40]}" if progress.stage == "probe" else ""
+            current = (
+                f" | сейчас: {progress.prefix[:40]}"
+                if progress.stage in ("probe", "docs") and progress.prefix
+                else ""
+            )
             line = (
                 f"[{bar:<20}] {fraction:4.0%}"
                 f" | {label}: {progress.queries} | в очереди: {progress.pending}"
@@ -613,16 +768,46 @@ def run(argv: list[str] | None = None) -> int:
             print(file=sys.stderr)
             progress_shown = False
             line_width = 0
-        print(
+        line = (
             f"контекст {context.fingerprint} ({path}):"
-            f" {len(scan.catalog.commands)} команд",  # type: ignore[attr-defined]
-            file=sys.stderr,
-            flush=True,
+            f" {len(scan.catalog.commands)} команд"  # type: ignore[attr-defined]
         )
+        name = getattr(context, "name", "")
+        if _block_total and name in _planned_blocks and name not in _blocks_done:
+            _blocks_done.add(name)
+            line = f"блок {len(_blocks_done)}/{_block_total} — {line}"
+        print(line, file=sys.stderr, flush=True)
+
+    # A cancellable run (only the interactive menu asks for this) installs a
+    # SIGINT handler that just raises a flag; the crawl reads it at its next
+    # checkpoint and stops cleanly, keeping the partial catalog. Ctrl-C therefore
+    # aborts the scan without killing the launcher, and control returns to the
+    # menu. A one-shot invocation keeps Python's default Ctrl-C (a hard exit).
+    cancelled = {"flag": False}
+    is_cancelled: Callable[[], bool] | None = None
+    previous_sigint = None
+    if cancellable:
+        import signal
+
+        def _request_cancel(_signum: int, _frame: object) -> None:
+            cancelled["flag"] = True
+
+        def _cancel_asked() -> bool:
+            return cancelled["flag"]
+
+        try:
+            previous_sigint = signal.signal(signal.SIGINT, _request_cancel)
+        except (ValueError, OSError):
+            previous_sigint = None  # off the main thread: cancel just unavailable
+        else:
+            is_cancelled = _cancel_asked
 
     try:
         config = load_config(args.config, require_device=args.mode != "docs")
-        if args.enter_modes:
+        run_target = getattr(args, "run_target", None)
+        # A scoped block from the map browser is walked through the context
+        # graph, so entering modes is implied whether or not the toggle was set.
+        if args.enter_modes or run_target is not None:
             config = replace(
                 config,
                 discovery=replace(config.discovery, enter_modes=True),
@@ -637,6 +822,9 @@ def run(argv: list[str] | None = None) -> int:
             args.docs,
             on_progress=None if args.quiet else show_progress,
             on_context=None if args.quiet else show_context,
+            is_cancelled=is_cancelled,
+            run_target=run_target,
+            discover=getattr(args, "discover", False),
         )
     except ConfigurationError as error:
         print(f"configuration error: {error}", file=sys.stderr)
@@ -653,6 +841,15 @@ def run(argv: list[str] | None = None) -> int:
     finally:
         if progress_shown:
             print(file=sys.stderr)
+        if previous_sigint is not None:
+            import signal
+
+            signal.signal(signal.SIGINT, previous_sigint)
+    if cancelled["flag"] and not args.quiet:
+        print(
+            "отменено — записан частичный каталог (scan incomplete)",
+            file=sys.stderr,
+        )
     if not args.quiet:
         if args.mode == "docs":
             print(f"Wrote {outcome.commands} documentation commands to {outcome.catalog_path}")

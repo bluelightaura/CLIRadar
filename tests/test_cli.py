@@ -194,6 +194,62 @@ def test_requires_an_explicit_scan_mode(capsys: pytest.CaptureFixture[str]) -> N
     assert "choose mode: compare, audit, or docs" in capsys.readouterr().err
 
 
+def test_menu_loop_runs_a_pick_then_leaves_on_quit(monkeypatch) -> None:
+    import argparse
+
+    from cliradar import cli, menu
+    from cliradar.menu import MenuSelection
+
+    picks = iter([MenuSelection(mode="docs", config=Path("c.yml")), None])
+    monkeypatch.setattr(menu, "interactive_menu", lambda *a, **k: next(picks))
+    monkeypatch.setattr(menu, "prompt_return", lambda: True)  # loop once, then quit
+    calls: list[tuple[str | None, bool]] = []
+
+    def _fake_execute(args: argparse.Namespace, cancellable: bool = False) -> int:
+        calls.append((args.mode, cancellable))
+        return ExitCode.OK
+
+    monkeypatch.setattr(cli, "_execute", _fake_execute)
+    assert cli.run([]) == ExitCode.OK
+    # The docs pick ran exactly once, and menu runs are cancellable.
+    assert calls == [("docs", True)]
+
+
+def test_execute_cancel_flips_is_cancelled_and_restores_handler(
+    monkeypatch, tmp_path: Path
+) -> None:
+    import argparse
+    import signal
+
+    from cliradar import cli
+    from cliradar.cli import ScanOutcome
+
+    seen: dict[str, bool] = {}
+
+    def _fake_build(*_args: object, is_cancelled=None, **_kwargs: object):
+        seen["before"] = is_cancelled()
+        os.kill(os.getpid(), signal.SIGINT)  # the person hits Ctrl-C mid-scan
+        seen["after"] = is_cancelled()
+        return ScanOutcome(tmp_path / "out.yml", None, 3, 0, True)
+
+    monkeypatch.setattr(cli, "load_config", lambda *a, **k: object())
+    monkeypatch.setattr(cli, "build_catalog", _fake_build)
+    before_handler = signal.getsignal(signal.SIGINT)
+    args = argparse.Namespace(
+        mode="audit",
+        docs=Path("d"),
+        config=Path("c.yml"),
+        check_config=False,
+        enter_modes=False,
+        quiet=True,
+    )
+    assert cli._execute(args, cancellable=True) == ExitCode.OK
+    # The crawl saw the flag go false -> true exactly when Ctrl-C arrived.
+    assert seen == {"before": False, "after": True}
+    # The prior SIGINT handler is put back, so a later hard Ctrl-C still exits.
+    assert signal.getsignal(signal.SIGINT) is before_handler
+
+
 class FakeSession(FakeDevice):
     """A SwitchSession stand-in: the device emulator behind the real signature."""
 

@@ -17,3 +17,4 @@ vendor_docs/*
 !vendor_docs/example.md
 # Local work log; may hold real lab details, never committed.
 NEW_STUFF
+cliradar_check/
