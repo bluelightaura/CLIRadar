@@ -33,14 +33,27 @@ TERMINATOR_RE = re.compile(r"^(?:return|end|exit|quit)\s*$", re.IGNORECASE)
 COMMENT_RE = re.compile(r"^\s*(?:!|;|//)")
 PROMPT_RE = re.compile(r"^\S*[>#$]\s*$")
 DIGITS_RE = re.compile(r"\d+")
-# Values worth hiding before the parsed configuration is stored. The whole line
-# goes: the secret is usually the last of several tokens, and a partial match
-# would leave it in place.
-SECRET_RE = re.compile(
-    r"\b(?:password|secret|community|pre-shared|psk|key(?:-string)?|md5|hmac|"
-    r"authentication-key|shared-key|private-key|certificate|cipher|"
-    r"simple)\b",
-    re.IGNORECASE,
+# Tokens that introduce a secret value. The value's position is vendor-specific
+# - it can sit one or several tokens after the keyword, and before or after
+# other qualifiers ("community read <secret>" vs "community <secret> ro") - so
+# redaction keeps the line up to and including the keyword and blanks the whole
+# remainder rather than guessing which token is the secret. Matching is on whole
+# tokens, so a compound like "hmac-sha-256" is not mistaken for a secret.
+SECRET_KEYWORDS: frozenset[str] = frozenset(
+    {
+        "password",
+        "secret",
+        "community",
+        "pre-shared",
+        "psk",
+        "key",
+        "key-string",
+        "authentication-key",
+        "shared-key",
+        "private-key",
+        "certificate",
+        "cipher",
+    }
 )
 # Free text that follows a keyword and is not part of the command grammar.
 VERBATIM_START_RE = re.compile(
@@ -71,9 +84,11 @@ class ConfigLine:
 
         What belongs in a shared report is which command was configured, never
         with what: an unmatched line is evidence about the scan, and its
-        address, key or interface number is about the customer.
+        address, key or interface number is about the customer. A secret value
+        is blanked outright first, so an unexplained secret line names its
+        command in the gap list without carrying the secret into it.
         """
-        return skeleton_of(self.text)
+        return skeleton_of(_blank_secret_line(self.text))
 
 
 def skeleton_of(text: str) -> str:
@@ -88,16 +103,25 @@ def skeleton_of(text: str) -> str:
     return " ".join(tokens)
 
 
+def _blank_secret_line(line: str) -> str:
+    """Keep a line up to its first secret keyword and blank the remainder.
+
+    The secret value can sit anywhere after the keyword and its position differs
+    between platforms, so nothing after the keyword is trusted to be safe. A
+    keyword that is the last token introduces no value and leaves the line as it
+    is, which keeps qualifier-only lines ("authentication-mode md5") intact.
+    """
+    indent = line[: len(line) - len(line.lstrip())]
+    tokens = line.split()
+    for index, token in enumerate(tokens):
+        if token.lower() in SECRET_KEYWORDS and index + 1 < len(tokens):
+            return f"{indent}{' '.join(tokens[: index + 1])} <redacted>"
+    return line
+
+
 def redact_secrets(text: str) -> str:
-    """Blank the value of any line that names a secret."""
-    lines = []
-    for line in text.splitlines():
-        if SECRET_RE.search(line):
-            indent = line[: len(line) - len(line.lstrip())]
-            lines.append(f"{indent}{skeleton_of(line.strip())} <redacted>")
-        else:
-            lines.append(line)
-    return "\n".join(lines)
+    """Blank the value of every line that names a secret, line by line."""
+    return "\n".join(_blank_secret_line(line) for line in text.splitlines())
 
 
 def _strip_echo(lines: list[str], command: str) -> list[str]:

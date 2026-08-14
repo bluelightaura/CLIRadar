@@ -104,6 +104,29 @@ def test_skeleton_folds_values_but_keeps_keywords() -> None:
     assert skeleton_of("port link-type access") == "port link-type access"
 
 
+def test_word_shaped_secret_is_blanked() -> None:
+    # A password or community that carries no digit and is short would slip past
+    # a value-folding redaction; it must still be removed.
+    redacted = redact_secrets("username admin password cisco\nsnmp-server community public ro")
+    assert "cisco" not in redacted
+    assert "public" not in redacted
+    assert redacted.count("<redacted>") == 2
+
+
+def test_redaction_blanks_the_value_wherever_it_sits() -> None:
+    # The secret is last here (after the "read" qualifier) and first-after-keyword
+    # there; both leave nothing after the keyword.
+    assert redact_secrets("snmp-agent community read Public0") == "snmp-agent community <redacted>"
+    assert redact_secrets("password 7 070C285F") == "password <redacted>"
+
+
+def test_qualifier_only_line_is_not_mangled() -> None:
+    # A bare keyword with no value introduces no secret, and a compound token is
+    # not the keyword: neither must be touched.
+    assert redact_secrets("authentication-mode md5") == "authentication-mode md5"
+    assert redact_secrets("authentication-mode hmac-sha-256") == "authentication-mode hmac-sha-256"
+
+
 # -- matching against the catalog -----------------------------------------
 
 
@@ -156,6 +179,36 @@ def test_coverage_is_one_when_everything_is_known() -> None:
     coverage = correlate(lines, catalog)
     assert coverage.to_dict()["coverage"] == 1.0
     assert coverage.count("unmatched") == 0
+
+
+def test_secret_line_still_matches_the_catalog() -> None:
+    # Correlation runs on the real tokens, so a configured secret the catalog
+    # explains stays matched and never drags completeness down (finding B).
+    catalog = _catalog("snmp-agent community read WORD")
+    lines = parse_config("snmp-agent community read s3cr3t")
+    coverage = correlate(lines, catalog)
+    assert coverage.count("unmatched") == 0
+    assert coverage.to_dict()["coverage"] == 1.0
+
+
+def test_unmatched_secret_line_names_the_command_without_the_value() -> None:
+    catalog = _catalog("interface IFNAME")  # nothing about snmp here
+    lines = parse_config("snmp-server community topsecretword ro")
+    summary = correlate(lines, catalog).to_dict()
+    missing = " ".join(str(item["command"]) for item in summary["missing_from_catalog"])
+    assert "topsecretword" not in missing
+    assert "community" in missing
+
+
+def test_render_shows_redacted_text_while_correlation_used_the_real_line() -> None:
+    catalog = _catalog("snmp-agent community read WORD")
+    output = "snmp-agent community read topsecretword"
+    coverage = correlate(parse_config(output), catalog)
+    rendered = render_config_yaml(parse_config(redact_secrets(output)), coverage)
+    assert "topsecretword" not in rendered
+    assert "community" in rendered
+    # It matched on the real tokens, so it is not flagged as a catalog gap.
+    assert "НЕ НАЙДЕНО В КАТАЛОГЕ" not in rendered
 
 
 def test_render_marks_unknown_lines_in_place() -> None:
