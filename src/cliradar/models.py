@@ -122,11 +122,16 @@ class Catalog:
         else:
             status_counts = {"parsed": 0}
         command_items = []
+        # provably_absent walks the command token by token against the
+        # enumerated set; its result only distinguishes missing_on_device from
+        # not_observed, which exists solely in compare mode. In audit and docs
+        # that walk would run for every command and then be discarded.
+        compare_mode = self.mode == "compare"
         for key in sorted(self.commands, key=lambda item: (item.count(" "), item)):
             item = self.commands[key].to_dict(
                 mode=self.mode,
                 scan_complete=scan_complete,
-                provably_absent=self.provably_absent(key),
+                provably_absent=self.provably_absent(key) if compare_mode else False,
             )
             status = (
                 item.get("comparison_status")
