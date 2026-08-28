@@ -26,6 +26,15 @@ device:
   # pages, so reading it has its own budget rather than the per-query timeout.
   capture_timeout: 120
   max_response_bytes: 2097152
+  # Seconds between SSH keepalives. A long scan spends minutes waiting behind
+  # slow contexts, and devices (or the firewalls in front of them) hang up on a
+  # transport that says nothing for that long. 0 turns keepalives off.
+  keepalive: 15
+  # How many extra attempts to make when opening the connection fails, and the
+  # first pause between them (it doubles, up to 8s). A rejected password or
+  # host key is never retried - only refusals that may pass on their own.
+  connect_retries: 2
+  retry_backoff: 1.0
 
 discovery:
   max_depth: 32

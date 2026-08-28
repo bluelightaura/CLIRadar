@@ -94,6 +94,9 @@ def test_ssh_disables_legacy_rsa(monkeypatch: pytest.MonkeyPatch) -> None:
         def connect(self, **kwargs: object) -> None:
             self.connect_options = kwargs
 
+        def get_transport(self) -> object:
+            return None  # no transport to arm a keepalive on
+
         def invoke_shell(self, **kwargs: object) -> object:
             return object()
 
@@ -264,6 +267,9 @@ def test_closes_client_when_prompt_detection_fails(monkeypatch: pytest.MonkeyPat
         def connect(self, **kwargs: object) -> None:
             pass
 
+        def get_transport(self) -> object:
+            return None
+
         def invoke_shell(self, **kwargs: object) -> object:
             return object()
 
@@ -397,3 +403,171 @@ def test_enable_is_skipped_when_not_configured() -> None:
     session._enter_privileged()
 
     assert session.channel.sent == []
+
+
+# --------------------------------------------------------------------------- #
+# Staying connected: keepalive, retries with backoff, recoverable drops
+# --------------------------------------------------------------------------- #
+
+class _StubTransport:
+    def __init__(self) -> None:
+        self.keepalive: int | None = None
+        self.active = True
+
+    def set_keepalive(self, interval: int) -> None:
+        self.keepalive = interval
+
+    def is_active(self) -> bool:
+        return self.active
+
+
+class _StubChannel:
+    def close(self) -> None:
+        pass
+
+
+class _StubClient:
+    """A paramiko client stand-in whose connect() can be made to fail."""
+
+    def __init__(self, failures: list[BaseException] | None = None) -> None:
+        self.transport = _StubTransport()
+        self.failures = list(failures or [])
+        self.attempts = 0
+        self.closed = 0
+
+    def set_missing_host_key_policy(self, policy: object) -> None:
+        pass
+
+    def load_system_host_keys(self) -> None:
+        pass
+
+    def connect(self, **_kwargs: object) -> None:
+        self.attempts += 1
+        if self.failures:
+            raise self.failures.pop(0)
+
+    def get_transport(self) -> _StubTransport:
+        return self.transport
+
+    def invoke_shell(self, **_kwargs: object) -> object:
+        return _StubChannel()
+
+    def close(self) -> None:
+        self.closed += 1
+
+
+def _session_with(monkeypatch, client: _StubClient, **config: object) -> SwitchSession:
+    monkeypatch.setattr("cliradar.session.paramiko.SSHClient", lambda: client)
+    monkeypatch.setenv("SWITCH_PASSWORD", "not-stored")
+    session = SwitchSession({"host": "d.invalid", "username": "readonly", **config})
+    monkeypatch.setattr(session, "_read_until_prompt", lambda: "")
+    return session
+
+
+def test_keepalive_is_armed_on_the_transport(monkeypatch) -> None:
+    client = _StubClient()
+    session = _session_with(monkeypatch, client, keepalive=25)
+    session.__enter__()
+    # Without this the device (or a firewall) hangs up on a session that spends
+    # a minute waiting behind one slow context.
+    assert client.transport.keepalive == 25
+
+
+def test_keepalive_can_be_turned_off(monkeypatch) -> None:
+    client = _StubClient()
+    session = _session_with(monkeypatch, client, keepalive=0)
+    session.__enter__()
+    assert client.transport.keepalive is None
+
+
+def test_connect_retries_a_transient_failure_with_a_backoff(monkeypatch) -> None:
+    import paramiko
+
+    slept: list[float] = []
+    monkeypatch.setattr("cliradar.session.time.sleep", slept.append)
+    client = _StubClient([TimeoutError("no route"), paramiko.SSHException("banner")])
+    session = _session_with(monkeypatch, client, connect_retries=2, retry_backoff=1.0)
+
+    session.__enter__()
+
+    assert client.attempts == 3  # two refusals, then the connection stands
+    assert session.connect_retries_used == 2
+    assert slept == [1.0, 2.0]  # the pause doubles between attempts
+
+
+def test_connect_backoff_is_capped(monkeypatch) -> None:
+    from cliradar.session import MAX_BACKOFF_SECONDS
+
+    slept: list[float] = []
+    monkeypatch.setattr("cliradar.session.time.sleep", slept.append)
+    failures = [TimeoutError("x") for _ in range(4)]
+    client = _StubClient(failures)
+    session = _session_with(monkeypatch, client, connect_retries=6, retry_backoff=4.0)
+    session.__enter__()
+    assert max(slept) <= MAX_BACKOFF_SECONDS
+
+
+def test_a_rejected_password_is_not_retried(monkeypatch) -> None:
+    import paramiko
+
+    monkeypatch.setattr("cliradar.session.time.sleep", lambda _: None)
+    client = _StubClient([paramiko.AuthenticationException("no")])
+    session = _session_with(monkeypatch, client, connect_retries=5)
+    with pytest.raises(paramiko.AuthenticationException):
+        session.__enter__()
+    assert client.attempts == 1  # waiting does not make a wrong password right
+
+
+def test_the_last_failure_is_raised_when_every_attempt_fails(monkeypatch) -> None:
+    monkeypatch.setattr("cliradar.session.time.sleep", lambda _: None)
+    client = _StubClient([TimeoutError("first"), TimeoutError("last")])
+    session = _session_with(monkeypatch, client, connect_retries=1, retry_backoff=0.1)
+    with pytest.raises(TimeoutError, match="last"):
+        session.__enter__()
+    assert client.attempts == 2
+
+
+def test_a_dropped_transport_is_reported_as_a_recoverable_oserror(monkeypatch) -> None:
+    import paramiko
+
+    from cliradar.session import SessionDropped
+
+    session = SwitchSession({"host": "d.invalid", "username": "readonly"})
+
+    def _dropped(_prefix: str) -> str:
+        raise paramiko.SSHException("Socket is closed")
+
+    monkeypatch.setattr(session, "_query_help", _dropped)
+    with pytest.raises(SessionDropped) as caught:
+        session.query_help("show")
+    # The navigator recovers from an OSError and ends the scan on anything
+    # else, so the class of the error decides whether a blip is survivable.
+    assert isinstance(caught.value, OSError)
+    assert "Socket is closed" in str(caught.value)
+
+
+def test_commands_on_a_closed_session_are_recoverable_too() -> None:
+    from cliradar.session import SessionDropped
+
+    session = SwitchSession({"host": "d.invalid", "username": "readonly"})
+    for call in (
+        lambda: session.query_help("show"),
+        lambda: session.run_command("show version"),
+        lambda: session.capture_output("show run"),
+        lambda: session.probe_prompt(),
+        lambda: session.interrupt(),
+    ):
+        with pytest.raises(SessionDropped):
+            call()
+
+
+def test_reopen_rebuilds_a_dead_transport_and_counts_it(monkeypatch) -> None:
+    client = _StubClient()
+    session = _session_with(monkeypatch, client)
+    session.__enter__()
+    client.transport.active = False  # the device hung up between two queries
+
+    session.reopen()
+
+    assert session.reconnects == 1
+    assert client.attempts == 2  # the whole connection was built again

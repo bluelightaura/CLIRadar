@@ -43,6 +43,28 @@ ENABLE_FAIL_RE = re.compile(
 
 _LOG_LOCK = threading.Lock()
 
+# Failures worth another attempt: the network refused, timed out or hung up.
+# Authentication and host-key refusals are deliberately absent - retrying them
+# only repeats a rejection, and a wrong password must surface at once.
+_RETRYABLE = (paramiko.SSHException, OSError, TimeoutError, EOFError)
+_FATAL = (paramiko.AuthenticationException, paramiko.BadHostKeyException)
+
+# An upper bound on the pause between connection attempts. The backoff doubles
+# from device.retry_backoff; without a cap a long-retry configuration would
+# leave the scan asleep for minutes.
+MAX_BACKOFF_SECONDS = 8.0
+
+
+class SessionDropped(ConnectionError):
+    """The transport died under a command that had already been sent.
+
+    Deliberately an OSError: every caller in the crawl already treats an OSError
+    from the terminal as "the position is lost, recover" - the navigator reopens
+    the channel and replays the entry path. Paramiko's own SSHException is not
+    an OSError, so without this translation a mid-scan disconnect escaped all
+    the way out and ended a scan that was perfectly recoverable.
+    """
+
 
 class SwitchSession:
     def __init__(self, config: dict[str, Any], raw_log: Path | None = None) -> None:
@@ -52,6 +74,11 @@ class SwitchSession:
         self.channel: paramiko.Channel | None = None
         self.max_response_bytes = int(config.get("max_response_bytes", 2 * 1024 * 1024))
         self.log_failures = 0
+        # How often the transport had to be rebuilt, and how often an attempt
+        # was retried after a transient failure. Both are reported by the scan,
+        # so a flaky link shows up as a number instead of as a mystery.
+        self.reconnects = 0
+        self.connect_retries_used = 0
         self._siblings: list[SwitchSession] = []
 
     def __enter__(self) -> Self:
@@ -59,6 +86,34 @@ class SwitchSession:
         return self
 
     def _connect(self) -> None:
+        """Open the session, retrying a transient failure with a backoff.
+
+        A scan that starts at the wrong moment - a device still booting an
+        interface, a firewall state table mid-flush - used to end on the first
+        refusal. Attempts are spaced by a doubling pause; a rejected password or
+        host key is raised at once, because no amount of waiting fixes it.
+        """
+        attempts = max(0, int(self.config.get("connect_retries", 2))) + 1
+        pause = max(0.0, float(self.config.get("retry_backoff", 1.0)))
+        last: Exception | None = None
+        for attempt in range(attempts):
+            try:
+                self._connect_once()
+                return
+            except _FATAL:
+                raise
+            except _RETRYABLE as error:
+                last = error
+                if attempt == attempts - 1:
+                    break
+                self.connect_retries_used += 1
+                self._log(f"\n### RETRY CONNECT ({attempt + 1}/{attempts - 1}): {error}\n")
+                if pause:
+                    time.sleep(min(pause * (2 ** attempt), MAX_BACKOFF_SECONDS))
+        assert last is not None  # the loop only breaks after a failed attempt
+        raise last
+
+    def _connect_once(self) -> None:
         password_env = self.config.get("password_env", "SWITCH_PASSWORD")
         password = os.environ.get(password_env)
         if not password:
@@ -67,6 +122,13 @@ class SwitchSession:
         self.client = paramiko.SSHClient()
         self.client.set_missing_host_key_policy(paramiko.RejectPolicy())
         known_hosts = self.config.get("known_hosts")
+        if known_hosts and not Path(known_hosts).is_file():
+            # A stale path (a moved or cleaned-up file) would otherwise surface
+            # as a bare ENOENT with no hint at which setting caused it.
+            raise RuntimeError(
+                f"device.known_hosts points to a missing file: {known_hosts} - "
+                "fix the path, or remove the setting and pin the key again"
+            )
         self.client.load_host_keys(known_hosts) if known_hosts else self.client.load_system_host_keys()
         try:
             self.client.connect(
@@ -82,12 +144,45 @@ class SwitchSession:
                     "pubkeys": ["ssh-rsa"],
                 },
             )
+            self._arm_keepalive()
             self.channel = self.client.invoke_shell(width=240, height=1000)
             self._read_until_prompt()
             self._enter_privileged()
         except Exception:
             self.client.close()
             raise
+
+    def _arm_keepalive(self) -> None:
+        """Ask paramiko to send keepalives so an idle session is not dropped.
+
+        A help query can sit for a minute behind a slow context, and devices (or
+        the firewalls in front of them) hang up on a transport that says nothing
+        for that long. Best-effort: a transport that refuses the setting still
+        works, it is just as fragile as it was before.
+        """
+        interval = float(self.config.get("keepalive", 15))
+        if interval <= 0 or self.client is None:
+            return
+        transport = self.client.get_transport()
+        if transport is None:
+            return
+        try:
+            transport.set_keepalive(int(interval))
+        except (paramiko.SSHException, OSError):
+            pass
+
+    def _guard(self, action: Callable[[], str]) -> str:
+        """Run a channel operation, reporting a dead transport as SessionDropped.
+
+        Paramiko raises SSHException when the connection dies under a command.
+        That is not an OSError, so it used to escape every recovery path in the
+        crawl and end the scan; translated here, it lands in the same handler as
+        a closed channel and the navigator rebuilds the session and carries on.
+        """
+        try:
+            return action()
+        except paramiko.SSHException as error:
+            raise SessionDropped(f"the device session dropped: {error}") from error
 
     def __exit__(self, *_: object) -> None:
         for sibling in self._siblings:
@@ -127,8 +222,11 @@ class SwitchSession:
         return [sibling.query_help for sibling in self.open_extra_sessions(count)]
 
     def query_help(self, prefix: str) -> str:
+        return self._guard(lambda: self._query_help(prefix))
+
+    def _query_help(self, prefix: str) -> str:
         if not self.channel:
-            raise RuntimeError("SSH session is not connected")
+            raise SessionDropped("the SSH session is not connected")
         self._validate_prefix(prefix)
         self.channel.send("\x15")
         self._read_available()
@@ -140,6 +238,9 @@ class SwitchSession:
         return output
 
     def run_command(self, command: str) -> str:
+        return self._guard(lambda: self._run_command(command))
+
+    def _run_command(self, command: str) -> str:
         """Execute a command and return its output.
 
         This is the only place where the scanner submits a discovered command
@@ -149,7 +250,7 @@ class SwitchSession:
         later keystroke, and answering it would apply a change nobody asked for.
         """
         if not self.channel:
-            raise RuntimeError("SSH session is not connected")
+            raise SessionDropped("the SSH session is not connected")
         self._validate_prefix(command)
         self.channel.send("\x15")
         self._read_available()
@@ -165,6 +266,9 @@ class SwitchSession:
         return output
 
     def capture_output(self, command: str) -> str:
+        return self._guard(lambda: self._capture_output(command))
+
+    def _capture_output(self, command: str) -> str:
         """Run a read-only command and collect everything it prints.
 
         `run_command` stops at the first redrawn prompt, which is right for a
@@ -177,7 +281,7 @@ class SwitchSession:
         instead of an exception; a truncated configuration still names commands.
         """
         if not self.channel:
-            raise RuntimeError("SSH session is not connected")
+            raise SessionDropped("the SSH session is not connected")
         self._validate_prefix(command)
         self.channel.send("\x15")
         self._read_available()
@@ -214,6 +318,9 @@ class SwitchSession:
         return output
 
     def probe_prompt(self) -> str:
+        return self._guard(lambda: self._probe_prompt())
+
+    def _probe_prompt(self) -> str:
         """Ask the device to redraw its prompt without changing anything.
 
         An empty line is the only position check that is safe in every
@@ -222,7 +329,7 @@ class SwitchSession:
         would move the session while measuring it.
         """
         if not self.channel:
-            raise RuntimeError("SSH session is not connected")
+            raise SessionDropped("the SSH session is not connected")
         # Anything still buffered belongs to the previous command; reading it
         # as the answer to this one would report a stale position.
         self._read_available()
@@ -236,13 +343,16 @@ class SwitchSession:
         return output
 
     def interrupt(self) -> str:
+        return self._guard(lambda: self._interrupt())
+
+    def _interrupt(self) -> str:
         """Abort a pending dialog, pager or hung command.
 
         Recovery only: this may drop the session out of its current context,
         so it is used when nothing answers, never to check position.
         """
         if not self.channel:
-            raise RuntimeError("SSH session is not connected")
+            raise SessionDropped("the SSH session is not connected")
         self.channel.send("\x03")
         output = self._read_until_idle()
         self.channel.send("\r")
@@ -277,7 +387,11 @@ class SwitchSession:
                 pass
         if self.client:
             self.client.close()
+        # A rebuild in the middle of a scan is the case the backoff in _connect
+        # exists for: the device that just hung up is often a second away from
+        # accepting again, and a single immediate attempt would miss it.
         self._connect()
+        self.reconnects += 1
         self._log("\n### RECONNECTED\n")
 
     def _enter_privileged(self) -> None:

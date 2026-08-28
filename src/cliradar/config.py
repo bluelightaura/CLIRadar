@@ -37,6 +37,17 @@ class DeviceConfig:
     # arrives in pages, so it gets its own budget instead of the read timeout.
     capture_timeout: float = 120.0
     max_response_bytes: int = 2 * 1024 * 1024
+    # Long scans die on idle disconnects more often than on anything else: the
+    # device (or a firewall between) drops a session that says nothing for a
+    # few minutes, and a help query can sit behind a slow context for exactly
+    # that long. A keepalive packet every few seconds keeps the transport
+    # visibly alive; 0 turns it off.
+    keepalive: float = 15.0
+    # A dropped connection is usually momentary, so opening one is retried a
+    # couple of times with a growing pause instead of ending the scan. Auth
+    # and host-key refusals are never retried - they will not become true.
+    connect_retries: int = 2
+    retry_backoff: float = 1.0
     known_hosts: str | None = None
     # A Cisco-like login lands in an unprivileged view whose prompt ends in
     # '>'; the full command surface and the running configuration sit behind an
@@ -68,6 +79,12 @@ class DeviceConfig:
                 raise ConfigurationError(
                     "device.enable_password_env must be a valid environment variable name"
                 )
+        if not 0 <= self.keepalive <= 3600:
+            raise ConfigurationError("device.keepalive must be between 0 and 3600")
+        if not 0 <= self.connect_retries <= 10:
+            raise ConfigurationError("device.connect_retries must be between 0 and 10")
+        if not 0 <= self.retry_backoff <= 60:
+            raise ConfigurationError("device.retry_backoff must be between 0 and 60")
         if not 0 < self.capture_timeout <= 3600:
             raise ConfigurationError(
                 "device.capture_timeout must be greater than 0 and at most 3600"
@@ -101,6 +118,9 @@ class DeviceConfig:
             "idle_timeout": self.idle_timeout,
             "capture_timeout": self.capture_timeout,
             "max_response_bytes": self.max_response_bytes,
+            "keepalive": self.keepalive,
+            "connect_retries": self.connect_retries,
+            "retry_backoff": self.retry_backoff,
             "known_hosts": self.known_hosts,
             "enable": self.enable,
             "enable_command": self.enable_command,
@@ -375,6 +395,9 @@ def load_config(path: Path, *, require_device: bool = True) -> AppConfig:
                 idle_timeout=float(device.get("idle_timeout", 0.35)),
                 capture_timeout=float(device.get("capture_timeout", 120)),
                 max_response_bytes=int(device.get("max_response_bytes", 2 * 1024 * 1024)),
+                keepalive=float(device.get("keepalive", 15)),
+                connect_retries=int(device.get("connect_retries", 2)),
+                retry_backoff=float(device.get("retry_backoff", 1.0)),
                 known_hosts=(
                     str(device["known_hosts"]) if device.get("known_hosts") is not None else None
                 ),
