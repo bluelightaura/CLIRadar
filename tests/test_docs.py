@@ -195,3 +195,35 @@ interval Интервал восстановления
         "error-down auto-recovery cause link-flap interval interval",
         "no error-down auto-recovery cause link-flap",
     }
+
+
+def test_reads_syntax_bulleted_with_the_bullet_operator(tmp_path: Path) -> None:
+    """A manual that began life as a PDF marks syntax with U+2219, not U+2022.
+
+    The two look identical on screen and are different code points, so a
+    reference converted out of a PDF hid every one of its syntax lines behind a
+    bullet the parser did not recognise.
+    """
+    (tmp_path / "reference.txt").write_text(
+        """
+10.4.22
+
+ddm report interval
+
+Синтаксис
+
+∙ ddm report interval value
+
+∙ no ddm report interval
+
+Параметры
+
+value Интервал отчёта
+""",
+        encoding="utf-8",
+    )
+
+    assert set(scan_documentation(tmp_path)) == {
+        "ddm report interval value",
+        "no ddm report interval",
+    }

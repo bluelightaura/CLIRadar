@@ -54,7 +54,13 @@ SECTION_COMMAND_RE = re.compile(
     r"^\s*\d+(?:\.\d+)+\s+(?P<command>[a-z][^\r\n.]*)\s*$"
 )
 SECTION_NUMBER_RE = re.compile(r"^\s*\d+(?:\.\d+)+\s*$")
-SYNTAX_BULLET_RE = re.compile(r"^\s*(?:[•●▪◦]\s*|[-*]\s+)")
+# Bullets a converted manual can start a syntax line with. The list is wider
+# than it looks: U+2219 BULLET OPERATOR and U+00B7 MIDDLE DOT are what a PDF
+# re-saved as .docx emits, and they are different code points from the
+# typographic U+2022 BULLET a hand-written document uses.
+SYNTAX_BULLET_RE = re.compile(
+    r"^\s*(?:[•●▪◦∙·‣▫○▸➢]\s*|[-*]\s+)"
+)
 TRAILING_COMMAND_HEADING_RE = re.compile(
     r"\s+(?:command|команда)\s*$",
     re.IGNORECASE,
