@@ -19,3 +19,5 @@ vendor_docs/*
 NEW_STUFF
 cliradar_check/
 known_hosts
+# Автожурнал состояния сессии; локальный, не коммитится.
+CHECKPOINT.md
