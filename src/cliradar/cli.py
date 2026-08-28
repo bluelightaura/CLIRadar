@@ -19,6 +19,7 @@ from .crawler import CrawlLimits, CrawlProgress, crawl
 from .docs import scan_documentation
 from .exceptions import CLIRadarError, ConfigurationError, DeviceConnectionError
 from .export import render_human_yaml, render_tree_yaml
+from .harvest import harvest_probe_entries
 from .models import Catalog
 from .report import render_html_report
 
@@ -53,8 +54,90 @@ def write_catalog(catalog: Catalog, destination: Path) -> None:
     _write_private_text(destination, content, "a catalog")
 
 
+def merge_scoped_catalog(master: dict, scoped: dict) -> dict:
+    """Fold a scoped block's deep parse back into the master map, in place.
+
+    The master is the map the browser navigates; a scoped run re-scans only the
+    chosen contexts, so its results replace exactly those pieces and leave the
+    rest untouched: commands are replaced by name, contexts by their path name
+    (new child contexts the deep parse discovered are appended), and the scan
+    totals and summary are recomputed from the merged whole. Timestamps take the
+    scoped run's - it is the newer knowledge.
+    """
+    by_command = {
+        str(item.get("command")): item for item in master.get("commands") or []
+    }
+    for item in scoped.get("commands") or []:
+        by_command[str(item.get("command"))] = item
+    master["commands"] = [
+        by_command[key]
+        for key in sorted(by_command, key=lambda text: (text.count(" "), text))
+    ]
+
+    master_scan = master.setdefault("scan", {})
+    scoped_scan = scoped.get("scan") or {}
+    contexts = list(master_scan.get("contexts") or [])
+    index_by_name = {str(ctx.get("name")): i for i, ctx in enumerate(contexts)}
+    for ctx in scoped_scan.get("contexts") or []:
+        name = str(ctx.get("name"))
+        if name in index_by_name:
+            contexts[index_by_name[name]] = ctx
+        else:
+            index_by_name[name] = len(contexts)
+            contexts.append(ctx)
+    master_scan["contexts"] = contexts
+    master_scan["queries"] = sum(int(ctx.get("queries") or 0) for ctx in contexts)
+    # Fail-closed as ever: the whole map is complete only when every context is,
+    # and any unexplained running-config lines the master recorded still veto it.
+    master_scan["complete"] = bool(contexts) and all(
+        ctx.get("complete") for ctx in contexts
+    ) and not master_scan.get("config_unexplained")
+
+    summary = master.setdefault("summary", {})
+    if "device_commands" in summary or "device_commands" in (
+        scoped.get("summary") or {}
+    ):
+        summary["device_commands"] = sum(
+            1
+            for item in master["commands"]
+            if "cli" in (item.get("source") or [])
+        )
+    if "present" in summary:
+        summary["present"] = sum(
+            1
+            for item in master["commands"]
+            if item.get("device_status") == "present"
+        )
+    if scoped.get("generated_at"):
+        master["generated_at"] = scoped["generated_at"]
+    return master
+
+
 def write_html_report(catalog: Catalog, destination: Path) -> None:
     _write_private_text(destination, render_html_report(catalog), "an HTML report")
+
+
+def write_block_reports(catalog: Catalog, destination: Path) -> list[Path]:
+    """Write one small markdown report per configuration block, beside the map.
+
+    The catalog is a reference; these are what a person reads when the question
+    is about one block ("what do we know about vlan on this box"). They live in
+    a `blocks/` directory next to the catalog they were rendered from, are
+    rewritten on every run, and are skipped silently for a run that mapped no
+    contexts - there is nothing to report on.
+    """
+    from .blockreport import render_block_reports
+
+    reports = render_block_reports(catalog.to_dict())
+    if not reports:
+        return []
+    folder = destination.parent / "blocks"
+    written: list[Path] = []
+    for name, text in reports.items():
+        path = folder / name
+        _write_private_text(path, text, "a block report")
+        written.append(path)
+    return written
 
 
 def write_exports(catalog: Catalog, config: AppConfig) -> None:
@@ -192,6 +275,9 @@ class ScanOutcome:
     # Documented commands left unverified against the device because the compare
     # budget was reached; reported so "missing" is not confused with "unchecked".
     verify_skipped: int = 0
+    # Per-block markdown reports written beside the catalog, and where they are.
+    block_reports: int = 0
+    blocks_path: Path | None = None
 
 
 def _compare_verify_seeds(
@@ -354,7 +440,8 @@ def build_catalog(
         # crawl still reaches the mode-entry verbs (vrf, mlag, ...) that open the
         # blocks, but skips the exhaustive per-parameter walk the deep parse of a
         # chosen block does later. This is what makes "Audit" land in the tree
-        # fast instead of catal0guing the whole device first.
+        # fast instead of catal0guing the whole device first. Inside a mode scan
+        # the same ceiling is spent more sparingly still - see `skim` below.
         limits = replace(limits, max_depth=min(2, limits.max_depth))
     seeds = list(config.discovery.seed_commands)
     verify_seeds, verify_skipped = (
@@ -407,6 +494,8 @@ def build_catalog(
                 # the modes they open (the exec-only choice).
                 start_contexts = None
                 descend = True
+                focus = getattr(run_target, "focus_verbs", None)
+                focus_verbs = frozenset(focus) if focus else None
                 starts = getattr(run_target, "starts", None)
                 if starts:
                     start_contexts = [
@@ -466,6 +555,16 @@ def build_catalog(
                     if on_context:
                         on_context(context_scan)
 
+                # Real instance values from the running configuration let the
+                # probes enter contexts the no-invented-values policy would
+                # otherwise skip (interface/vlan/line ...): the device already
+                # carries every harvested line, so typing it changes nothing.
+                harvested = (
+                    harvest_probe_entries(config_output, config_command)
+                    if config_output
+                    else {}
+                )
+
                 mode_report = scan_modes(
                     ModeNavigator(terminal=session),
                     limits=limits,
@@ -480,6 +579,18 @@ def build_catalog(
                     is_cancelled=budget_reached,
                     start_contexts=start_contexts,
                     descend=descend,
+                    # A blueprint block chosen in the tree ("open the VLAN
+                    # block") points the run at one set of head verbs, so the
+                    # probes typed in the starting context stay on that block.
+                    focus_verbs=focus_verbs,
+                    harvested_entries=harvested,
+                    # The discovery audit skims: one help query per context plus
+                    # the verbs that can open another mode. It finds the same
+                    # blocks as the old shallow walk at a fraction of the
+                    # round-trips, which is what makes the tree appear while the
+                    # operator is still looking at it. A chosen block is then
+                    # parsed in full, without the skim.
+                    skim=discover,
                 )
                 crawl_result = None
             else:
@@ -539,6 +650,24 @@ def build_catalog(
         }
         write_catalog(catalog, destination)
         write_exports(catalog, config)
+        block_reports = write_block_reports(catalog, destination)
+        if getattr(run_target, "starts", None):
+            # A scoped deep parse also refreshes the master map the browser
+            # reads, so the block the operator just parsed shows its new depth
+            # in the tree next time. The scoped file above stays as the run's
+            # own artifact; a master that cannot be read is left untouched.
+            master_path = config.output.catalog_for(mode)
+            try:
+                master = yaml.safe_load(master_path.read_text(encoding="utf-8"))
+            except (OSError, yaml.YAMLError):
+                master = None
+            if isinstance(master, dict):
+                merge_scoped_catalog(master, catalog.to_dict())
+                _write_private_text(
+                    master_path,
+                    yaml.safe_dump(master, sort_keys=False, allow_unicode=True),
+                    "the merged master catalog",
+                )
         html_destination = config.output.html_report if mode == "compare" else None
         if html_destination is not None:
             write_html_report(catalog, html_destination)
@@ -550,6 +679,8 @@ def build_catalog(
             complete,
             config_path=written_config,
             config_summary=catalog.configuration or None,
+            block_reports=len(block_reports),
+            blocks_path=block_reports[0].parent if block_reports else None,
         )
 
     catalog.scan = crawl_result.to_dict()
@@ -632,7 +763,7 @@ def _menu_loop(args: argparse.Namespace) -> int:
     on the very first pass and falls back to the usual usage error, so pipes and
     scripts behave exactly as before.
     """
-    from .menu import interactive_menu, prompt_return
+    from .menu import interactive_menu, prompt_return, run_banner
 
     ran = False
     last = ExitCode.OK
@@ -655,6 +786,11 @@ def _menu_loop(args: argparse.Namespace) -> int:
         chosen.discover = selection.discover
         if selection.config is not None:
             chosen.config = selection.config
+        # The run leaves the menu's screen behind, so it re-states what it is
+        # doing - and that Ctrl-C comes back here rather than to the shell.
+        if not args.quiet and (chosen.mode or chosen.check_config):
+            banner_key = "check" if chosen.check_config else chosen.mode
+            print(run_banner(chosen.config, banner_key))
         last = _execute(chosen, cancellable=True)
         ran = True
         # A discovery audit maps the mode structure, then hands the operator the
@@ -706,12 +842,11 @@ def _execute(args: argparse.Namespace, cancellable: bool = False) -> int:
     # context's few queries are divided by the whole run's elapsed time.
     stage_state = {"stage": "", "started": time.monotonic(), "origin": 0, "last": 0}
     line_width = 0
-    stage_labels = {
-        "crawl": "запросов",
-        "verify": "проверка копий",
-        "probe": "пробы режимов",
-        "docs": "читаю доки",
-    }
+    # The progress line speaks the launcher's language: whoever started the run
+    # from the menu is the one reading it. A scripted run never sees it - the
+    # progress callback is only wired up when --quiet is off.
+    from .menu import stage_label
+    from .menu import t as _t
 
     # When a scoped run covers several chosen blocks, number them as they finish
     # ("блок 3/7") so a whole-run parse reads as sequential progress, not silence.
@@ -734,7 +869,7 @@ def _execute(args: argparse.Namespace, cancellable: bool = False) -> int:
             )
         stage_state["last"] = progress.queries
         if progress.stage == "save":
-            line = f"запись каталога: {progress.commands} команд..."
+            line = f"{_t('pr_saving')}: {progress.commands} {_t('commands')}..."
         else:
             total = progress.queries + progress.pending
             fraction = progress.queries / total if total else 1.0
@@ -742,16 +877,16 @@ def _execute(args: argparse.Namespace, cancellable: bool = False) -> int:
             elapsed = time.monotonic() - stage_state["started"]
             done = progress.queries - stage_state["origin"]
             rate = done / elapsed if elapsed > 0 else 0.0
-            label = stage_labels.get(progress.stage, progress.stage)
+            label = stage_label(progress.stage)
             current = (
-                f" | сейчас: {progress.prefix[:40]}"
+                f" | {_t('pr_now')}: {progress.prefix[:40]}"
                 if progress.stage in ("probe", "docs") and progress.prefix
                 else ""
             )
             line = (
                 f"[{bar:<20}] {fraction:4.0%}"
-                f" | {label}: {progress.queries} | в очереди: {progress.pending}"
-                f"{current} | осталось: ~{_format_eta(progress.pending, rate)}"
+                f" | {label}: {progress.queries} | {_t('pr_queue')}: {progress.pending}"
+                f"{current} | {_t('pr_left')}: ~{_format_eta(progress.pending, rate)}"
             )
         # A shorter line must blank what the longer one left behind, or its
         # tail keeps showing ("~0сссс").
@@ -838,6 +973,13 @@ def _execute(args: argparse.Namespace, cancellable: bool = False) -> int:
     except (OSError, RuntimeError) as error:
         print(f"I/O error: {error}", file=sys.stderr)
         return ExitCode.SCAN
+    except Exception as error:  # noqa: BLE001 - last resort, see below
+        # Anything the layers below did not classify still has to come back as
+        # an exit code: a run started from the launcher must not dump a
+        # traceback into the terminal and take the menu down with it. Ctrl-C is
+        # a BaseException and stays uncaught, so cancelling still works.
+        print(f"unexpected error: {type(error).__name__}: {error}", file=sys.stderr)
+        return ExitCode.SCAN
     finally:
         if progress_shown:
             print(file=sys.stderr)
@@ -860,6 +1002,10 @@ def _execute(args: argparse.Namespace, cancellable: bool = False) -> int:
             )
         if outcome.html_path is not None:
             print(f"Wrote HTML report to {outcome.html_path}")
+        if outcome.block_reports and outcome.blocks_path is not None:
+            print(
+                f"Wrote {outcome.block_reports} per-block reports to {outcome.blocks_path}"
+            )
         print(f"Wrote command tree to {config.output.tree_catalog}")
         print(f"Wrote human-readable commands to {config.output.human_catalog}")
         if outcome.verify_skipped:

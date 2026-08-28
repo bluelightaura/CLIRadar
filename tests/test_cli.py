@@ -13,11 +13,88 @@ from cliradar.cli import (
     _config_unexplained,
     main,
     merge_context_scan,
+    merge_scoped_catalog,
     run,
     write_catalog,
     write_html_report,
 )
 from cliradar.models import Catalog
+
+
+def _cmd(command: str, source: list[str] | None = None, **extra) -> dict:
+    return {"command": command, "description": "", "executable": True,
+            "source": source or ["cli"], **extra}
+
+
+def _ctx(name: str, *, commands: int = 0, queries: int = 0,
+         complete: bool = False) -> dict:
+    return {"name": name, "fingerprint": "(config)#", "entry_path": [],
+            "parent": "#", "commands": commands, "queries": queries,
+            "complete": complete}
+
+
+def test_merge_scoped_replaces_contexts_and_commands_by_name() -> None:
+    master = {
+        "commands": [_cmd("show version"), _cmd("ip vrf red")],
+        "scan": {"contexts": [_ctx("root", queries=10, complete=False),
+                              _ctx("root/system-view/vrf", queries=5)],
+                 "queries": 15, "complete": False},
+        "summary": {"device_commands": 2, "present": 2},
+    }
+    scoped = {
+        "generated_at": "2026-08-14T12:00:00+00:00",
+        "commands": [_cmd("ip vrf red", device_status="present"),
+                     _cmd("ip vrf blue", device_status="present")],
+        "scan": {"contexts": [_ctx("root/system-view/vrf", queries=40,
+                                   complete=True)]},
+    }
+    merged = merge_scoped_catalog(master, scoped)
+    names = [c["command"] for c in merged["commands"]]
+    assert "ip vrf blue" in names  # new command appended
+    assert names == sorted(names, key=lambda t: (t.count(" "), t))
+    vrf = next(c for c in merged["scan"]["contexts"]
+               if c["name"] == "root/system-view/vrf")
+    assert vrf["complete"] is True and vrf["queries"] == 40  # replaced
+    assert merged["scan"]["queries"] == 50  # recomputed 10 + 40
+    assert merged["generated_at"] == "2026-08-14T12:00:00+00:00"
+
+
+def test_merge_scoped_appends_newly_discovered_child_contexts() -> None:
+    master = {"commands": [], "scan": {"contexts": [_ctx("root")]}}
+    scoped = {"commands": [],
+              "scan": {"contexts": [_ctx("root/system-view/vrf/af")]}}
+    merged = merge_scoped_catalog(master, scoped)
+    assert [c["name"] for c in merged["scan"]["contexts"]] == [
+        "root", "root/system-view/vrf/af"
+    ]
+
+
+def test_merge_scoped_completeness_stays_fail_closed() -> None:
+    # Even with every context complete, unexplained config lines veto the flag.
+    master = {"commands": [],
+              "scan": {"contexts": [_ctx("root", complete=True)],
+                       "config_unexplained": 3}}
+    scoped = {"commands": [],
+              "scan": {"contexts": [_ctx("root", complete=True)]}}
+    assert merge_scoped_catalog(master, scoped)["scan"]["complete"] is False
+    master["scan"]["config_unexplained"] = 0
+    assert merge_scoped_catalog(master, scoped)["scan"]["complete"] is True
+
+
+def test_merge_scoped_recomputes_summary_counts() -> None:
+    master = {
+        "commands": [_cmd("show version", device_status="present")],
+        "scan": {"contexts": []},
+        "summary": {"device_commands": 1, "present": 1},
+    }
+    scoped = {
+        "commands": [_cmd("ip vrf red", device_status="present"),
+                     _cmd("only docs", source=["documentation:m.txt"])],
+        "scan": {"contexts": []},
+    }
+    merged = merge_scoped_catalog(master, scoped)
+    assert merged["summary"]["device_commands"] == 2  # docs-only not counted
+    assert merged["summary"]["present"] == 2
 
 
 def test_config_unexplained_counts_lines_the_catalog_cannot_explain() -> None:
@@ -248,6 +325,32 @@ def test_execute_cancel_flips_is_cancelled_and_restores_handler(
     assert seen == {"before": False, "after": True}
     # The prior SIGINT handler is put back, so a later hard Ctrl-C still exits.
     assert signal.getsignal(signal.SIGINT) is before_handler
+
+
+def test_execute_turns_an_unclassified_failure_into_an_exit_code(
+    monkeypatch, capsys, tmp_path: Path
+) -> None:
+    """A launcher-driven run must never leave the menu on a traceback."""
+    import argparse
+
+    from cliradar import cli
+
+    def _boom(*_args: object, **_kwargs: object):
+        raise ZeroDivisionError("something nobody classified")
+
+    monkeypatch.setattr(cli, "load_config", _boom)
+    args = argparse.Namespace(
+        mode=None,
+        docs=Path("d"),
+        config=tmp_path / "c.yml",
+        check_config=True,
+        enter_modes=False,
+        quiet=False,
+    )
+    assert cli._execute(args, cancellable=True) == ExitCode.SCAN
+    err = capsys.readouterr().err
+    assert "unexpected error: ZeroDivisionError" in err
+    assert "something nobody classified" in err
 
 
 class FakeSession(FakeDevice):
