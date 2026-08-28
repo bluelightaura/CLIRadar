@@ -77,6 +77,10 @@ DEFAULT_MODE_ENTRY_VERBS: frozenset[str] = frozenset(
         "interface", "vlan", "vrf", "router", "bridge-domain",
         "policy-map", "class-map", "class", "route-map",
         "address-family", "key-chain", "template", "peer-group",
+        # `line vty <n>` opens the terminal-line view; it was the one common
+        # instance-entered context missing here, which kept it unscanned even
+        # once harvested real values made it enterable.
+        "line",
     }
 )
 

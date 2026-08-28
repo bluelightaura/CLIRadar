@@ -20,6 +20,7 @@ from cliradar.modes import (
     scan_modes,
 )
 from cliradar.navigator import (
+    DEFAULT_PROBE_DENYLIST,
     ModeContext,
     ModeNavigator,
     is_probe_allowed,
@@ -148,6 +149,48 @@ def test_scoped_scan_starts_at_a_chosen_context_and_stays_in_its_subtree() -> No
     # Its subtree is still found by probing from inside it.
     assert any(name.endswith("/vlan") for name in names)
     assert any(name.endswith("/interface") for name in names)
+
+
+def test_harvested_real_values_enter_contexts_without_samples() -> None:
+    # No parameter_samples at all: "interface IFNAME" and "vlan <1-4094>" are
+    # unsampled and would be skipped. Real lines lifted from the running config
+    # substitute for them, so the contexts are entered on values the device
+    # already carries.
+    device = FakeDevice()
+    bare_limits = CrawlLimits(max_depth=4, max_queries=200)
+    report = scan_modes(
+        navigator_for(device),
+        limits=bare_limits,
+        max_contexts=10,
+        root_probe_allowlist=frozenset({"configure"}),
+        harvested_entries={
+            "interface": ["interface eth1"],
+            "vlan": ["vlan 100"],
+        },
+    )
+
+    names = {scan.context.name for scan in report.scans}
+    assert any(name.endswith("/interface") for name in names)
+    assert any(name.endswith("/vlan") for name in names)
+    # The commands typed were the real lines, not invented values.
+    assert "interface eth1" in report.executed
+    assert "vlan 100" in report.executed
+
+
+def test_harvested_lines_still_respect_the_denylist() -> None:
+    device = FakeDevice()
+    bare_limits = CrawlLimits(max_depth=4, max_queries=200)
+    report = scan_modes(
+        navigator_for(device),
+        limits=bare_limits,
+        max_contexts=10,
+        root_probe_allowlist=frozenset({"configure"}),
+        # A harvested line whose head is denylisted must never be typed, no
+        # matter how real it is.
+        denylist=DEFAULT_PROBE_DENYLIST | frozenset({"vlan"}),
+        harvested_entries={"vlan": ["vlan 100"]},
+    )
+    assert "vlan 100" not in report.executed
 
 
 def test_shallow_scoped_scan_does_not_walk_into_opened_modes() -> None:
@@ -413,3 +456,127 @@ def test_scan_does_not_execute_named_parameter_commands() -> None:
     )
 
     assert not [command for command in device.commands if "cliradar" in command]
+
+
+# -- the skim pass --------------------------------------------------------
+
+
+def test_skim_asks_the_top_then_only_the_doors() -> None:
+    """One query for the context's own verbs, then one per possible mode."""
+    from cliradar.models import Catalog
+    from cliradar.modes import _skim_context
+    from cliradar.navigator import DEFAULT_MODE_ENTRY_VERBS
+
+    device = FakeDevice()
+    navigator = navigator_for(device)
+    context = ModeContext("config", "(config)#", ("configure",), "#")
+    navigator.ensure(context)
+    device.queries.clear()
+    guard = GuardedHelp(navigator, context)
+
+    catalog = Catalog(device={}, mode="audit")
+    result = _skim_context(
+        guard, catalog, LIMITS, DEFAULT_MODE_ENTRY_VERBS, [], None, None
+    )
+
+    asked = [query.strip() for query in device.queries]
+    # The top, then the two verbs that can open a mode - `hostname` and
+    # `logging` are statements and cost nothing.
+    assert asked[0] == ""
+    assert sorted(asked[1:]) == ["interface", "vlan"]
+    assert "hostname" not in asked and "logging" not in asked
+    # A skim never claims to have seen the whole context.
+    assert result.complete is False
+    assert result.queries == len(asked)
+
+
+def test_skim_finds_the_same_contexts_for_far_fewer_queries() -> None:
+    """The map is the same shape; only what is known inside each block is thin."""
+    harvested = {"vlan": ["vlan 10"], "interface": ["interface 10ge1/0/1"]}
+
+    full_device = FakeDevice()
+    full = scan_modes(navigator_for(full_device), limits=LIMITS)
+
+    skim_device = FakeDevice()
+    skimmed = scan_modes(
+        navigator_for(skim_device),
+        limits=LIMITS,
+        skim=True,
+        harvested_entries=harvested,
+    )
+
+    def names(report: ModeScanReport) -> list[str]:
+        return sorted(scan.context.name for scan in report.scans)
+
+    assert names(skimmed) == names(full)
+    assert len(skim_device.queries) < len(full_device.queries)
+    assert all(not scan.result.complete for scan in skimmed.scans)
+    # It stays a read-only walk: nothing was written to reach those contexts.
+    assert skim_device.executed_writes == []
+
+
+def test_skim_respects_a_shallower_configured_depth() -> None:
+    """A depth ceiling below the skim's own is an operator's word, not a floor."""
+    from cliradar.models import Catalog
+    from cliradar.modes import _skim_context
+    from cliradar.navigator import DEFAULT_MODE_ENTRY_VERBS
+
+    device = FakeDevice()
+    navigator = navigator_for(device)
+    context = ModeContext("config", "(config)#", ("configure",), "#")
+    navigator.ensure(context)
+    device.queries.clear()
+    guard = GuardedHelp(navigator, context)
+
+    shallow = CrawlLimits(max_depth=1, max_queries=200)
+    _skim_context(guard, Catalog(device={}, mode="audit"), shallow,
+                  DEFAULT_MODE_ENTRY_VERBS, [], None, None)
+
+    assert [query.strip() for query in device.queries] == [""]
+
+
+def test_focus_verbs_scope_a_run_to_one_block() -> None:
+    # Tapping "vlan" in the map browser must send the parser into the VLAN
+    # block and nowhere else: the interface block is left for its own row.
+    device = FakeDevice()
+    start = ModeContext(
+        name="root/configure",
+        fingerprint="(config)#",
+        entry_path=("configure",),
+        parent="#",
+    )
+    report = scan_modes(
+        navigator_for(device),
+        limits=LIMITS,
+        max_contexts=10,
+        start_contexts=[start],
+        focus_verbs=frozenset({"vlan"}),
+    )
+
+    names = {scan.context.name for scan in report.scans}
+    assert any(name.endswith("/vlan") for name in names)
+    assert not any(name.endswith("/interface") for name in names)
+    assert all(not command.startswith("interface") for command in report.executed)
+
+
+def test_focus_verbs_only_bind_the_contexts_the_run_starts_from() -> None:
+    # Inside the block the walk is ordinary again - a focus picks the way in,
+    # it does not follow the scan down and cut the block's own subtree short.
+    device = FakeDevice()
+    start = ModeContext(
+        name="root/configure",
+        fingerprint="(config)#",
+        entry_path=("configure",),
+        parent="#",
+    )
+    focused = scan_modes(
+        navigator_for(device),
+        limits=LIMITS,
+        max_contexts=10,
+        start_contexts=[start],
+        focus_verbs=frozenset({"vlan"}),
+    )
+    vlan_scan = next(
+        scan for scan in focused.scans if scan.context.name.endswith("/vlan")
+    )
+    assert vlan_scan.catalog.commands  # the block itself was crawled, not just entered

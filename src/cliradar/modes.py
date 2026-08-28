@@ -15,8 +15,8 @@ navigator re-establishes the context, and the query is repeated.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from dataclasses import dataclass, field
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field, replace
 
 from .crawler import CrawlLimits, CrawlProgress, CrawlResult, crawl
 from .models import Catalog
@@ -40,6 +40,15 @@ DEFAULT_MODE_HINTS: tuple[str, ...] = (
     "bridge-domain", "policy-map", "class-map", "filter-list", "acl",
     "ospf", "bgp", "pim", "ntp", "ptp", "dhcp", "g8032", "erps", "snmp",
 )
+
+
+# The skim pass, in two numbers. A context's "top" is one help query: the depth
+# check skips any node already carrying a word, so a depth of 1 asks the context
+# itself and nothing below it. The second pass reopens exactly the verbs that
+# could be doors, one query each, because that is the single thing the top
+# cannot say - whether `vlan` is a statement or a mode.
+SKIM_TOP_DEPTH = 1
+SKIM_ENTRY_DEPTH = 2
 
 
 # Catch-all placeholders: they mean "any word" and appear on unrelated
@@ -267,6 +276,9 @@ def scan_modes(
     is_cancelled: object = None,
     start_contexts: Sequence[ModeContext] | None = None,
     descend: bool = True,
+    harvested_entries: Mapping[str, Sequence[str]] | None = None,
+    skim: bool = False,
+    focus_verbs: frozenset[str] | None = None,
 ) -> ModeScanReport:
     """Walk the CLI as a graph of contexts, breadth first.
 
@@ -285,6 +297,26 @@ def scan_modes(
     modes they open - "this block, not the tree below it", the shallow run the
     exec-only choice needs. The children are still recorded as probes, so the
     map keeps learning the shape even when this run declines to walk into it.
+
+    ``harvested_entries`` maps a head verb to real instance lines lifted from
+    the device's own running configuration ("interface" -> ["interface
+    10ge1/0/10"]). They fill the gap the no-invented-values policy leaves: a
+    context entered by instance can be probed with a value that already exists
+    on the device, so typing it changes nothing. Each line is only tried in a
+    context whose crawled surface offers that verb, and the denylist and
+    mode-entry allowlist still apply.
+
+    ``focus_verbs`` narrows the probes typed in the contexts the run starts
+    from to those head verbs, which is how the map browser turns "open the VLAN
+    block" into a run that types vlan commands and nothing else. Contexts found
+    below a start are probed normally - the point is to reach one block quickly,
+    then map it properly. Without it every candidate the policy allows is tried.
+
+    ``skim`` trades depth for speed: every context is topped rather than walked
+    (see ``_skim_context``), which is what turns the first pass over a device
+    from a long catalogue into a map drawn in seconds. The contexts found are
+    the same ones; only what is known inside each is thinner, and each says so
+    by reporting itself incomplete.
     """
     report = ModeScanReport()
     root_fingerprint = navigator.bind_root()
@@ -295,6 +327,9 @@ def scan_modes(
     else:
         queue = [root]
         seen = {root.key}
+    # Where a focus applies: the contexts this run was pointed at, not the ones
+    # it discovers inside them.
+    focus_keys = set(seen) if focus_verbs else set()
 
     cancelled = is_cancelled if callable(is_cancelled) else None
     while queue and len(report.scans) < max_contexts:
@@ -314,33 +349,51 @@ def scan_modes(
             for worker in workers
             if _ensure(worker, context)
         ]
+        # The safe policy narrows every context to mode-entry verbs; without it
+        # the old behaviour stands, constraining the root alone. The skim needs
+        # this before it crawls - the allowlist is what it expands - so it is
+        # settled here rather than after the walk.
+        allowlist = (
+            mode_entry_verbs
+            if mode_entry_verbs is not None
+            else (root_probe_allowlist if context is root else None)
+        )
         catalog = Catalog(device=dict(device or {}), mode="audit")
-        result = crawl(
-            guard,
-            catalog,
-            seeds=[],
-            limits=limits,
-            on_progress=on_progress if callable(on_progress) else None,
-            is_cancelled=cancelled,
-            extra_query_helps=helpers,
+        result = (
+            _skim_context(
+                guard, catalog, limits, allowlist, helpers, on_progress, cancelled
+            )
+            if skim
+            else crawl(
+                guard,
+                catalog,
+                seeds=[],
+                limits=limits,
+                on_progress=on_progress if callable(on_progress) else None,
+                is_cancelled=cancelled,
+                extra_query_helps=helpers,
+            )
         )
         scan = ContextScan(context, catalog, result, guard.recoveries, guard.unverified)
         report.scans.append(scan)
         if callable(on_context):
             on_context(scan)
 
-        # The safe policy narrows every context to mode-entry verbs; without it
-        # the old behaviour stands, constraining the root alone.
-        allowlist = (
-            mode_entry_verbs
-            if mode_entry_verbs is not None
-            else (root_probe_allowlist if context is root else None)
-        )
         candidates, unsampled = _probe_candidates(
             scan, denylist, hints, limits.parameter_samples,
             allowlist,
             probe_invented_values,
         )
+        if harvested_entries:
+            candidates, unsampled = _add_harvested(
+                candidates, unsampled, harvested_entries, denylist, allowlist,
+                surface=scan.catalog.commands,
+            )
+        if focus_verbs and context.key in focus_keys:
+            candidates = [
+                command for command in candidates
+                if command.split()[0].lower() in focus_verbs
+            ]
         report.probes_unsampled += len(unsampled)
         report.unsampled_parameters.update(
             token for command in unsampled for token in command.split()
@@ -413,6 +466,78 @@ def scan_modes(
     return report
 
 
+def _skim_context(
+    guard: GuardedHelp,
+    catalog: Catalog,
+    limits: CrawlLimits,
+    allowlist: frozenset[str] | None,
+    helpers: Sequence[GuardedHelp],
+    on_progress: object,
+    cancelled: object,
+) -> CrawlResult:
+    """Take the top off a context instead of walking it out.
+
+    Two passes. The first asks a single help query and records the context's own
+    top-level verbs - the "top" an operator reads off the screen. The second
+    reopens only the verbs that could lead somewhere, because that is the one
+    thing the top cannot say: whether a verb is a statement or a door. What
+    hangs under a door is left for the deep parse of that block, on demand.
+
+    The saving is the whole point: a context offering eighty verbs costs one
+    query plus the handful that are mode entries, instead of eighty-one. The
+    result is reported incomplete by construction - a skim knows it skipped the
+    rest, and this project would rather under-claim than let a partial map read
+    as the whole device.
+    """
+    progress = on_progress if callable(on_progress) else None
+    workers = list(helpers)
+    top = crawl(
+        guard,
+        catalog,
+        seeds=[],
+        limits=replace(limits, max_depth=min(SKIM_TOP_DEPTH, limits.max_depth)),
+        on_progress=progress,
+        is_cancelled=cancelled,
+        extra_query_helps=workers,
+    )
+    verbs = sorted(
+        {
+            command.split()[0]
+            for command in catalog.commands
+            if command.split()
+            and (allowlist is None or command.split()[0].lower() in allowlist)
+        }
+    )
+    if not verbs or (cancelled and cancelled()):
+        return replace(top, complete=False)
+    entries = crawl(
+        guard,
+        catalog,
+        seeds=verbs,
+        limits=replace(limits, max_depth=min(SKIM_ENTRY_DEPTH, limits.max_depth)),
+        include_root=False,  # the top is already recorded; expand the doors only
+        on_progress=progress,
+        is_cancelled=cancelled,
+        extra_query_helps=workers,
+    )
+    return CrawlResult(
+        queries=top.queries + entries.queries,
+        complete=False,
+        query_limit_reached=top.query_limit_reached or entries.query_limit_reached,
+        pending_nodes=top.pending_nodes + entries.pending_nodes,
+        skipped_depth=top.skipped_depth + entries.skipped_depth,
+        skipped_denied=top.skipped_denied + entries.skipped_denied,
+        skipped_parameters=tuple(
+            sorted({*top.skipped_parameters, *entries.skipped_parameters})
+        ),
+        cancelled=top.cancelled or entries.cancelled,
+        derived_nodes=entries.derived_nodes,
+        derived_verified=entries.derived_verified,
+        derived_mismatched=entries.derived_mismatched,
+        derived_truncated=entries.derived_truncated,
+    )
+
+
 def _ensure(navigator: ModeNavigator, context: ModeContext) -> bool:
     """Place the session in `context`, repairing the channel if needed.
 
@@ -455,6 +580,52 @@ def _probe_candidates(
         else:
             unsampled.append(command)
     return probe_order(candidates, hints), unsampled
+
+
+def _add_harvested(
+    candidates: list[str],
+    unsampled: list[str],
+    harvested: Mapping[str, Sequence[str]],
+    denylist: frozenset[str],
+    allowlist: frozenset[str] | None,
+    surface: Mapping[str, object] | None = None,
+) -> tuple[list[str], list[str]]:
+    """Substitute real running-config lines for commands the context offers.
+
+    A parameterised command may be left unsampled - or fail to prove itself
+    executable at all, when its generic placeholder cannot be filled without
+    inventing a value. If the running configuration holds real instances under
+    a head verb the context's crawled surface offers, those lines are typeable
+    at zero risk - the device already carries them - so they join the
+    candidates FIRST (a certain entry beats a guessed one) and any matching
+    unsampled command stops counting as left untried. The denylist and
+    mode-entry allowlist gate them exactly like any candidate.
+    """
+    heads_wanting = {command.split()[0].lower() for command in unsampled}
+    # The crawled surface names every verb this context offers, including the
+    # ones whose parameter kept them out of `executables` entirely.
+    for command in surface or ():
+        heads_wanting.add(command.split()[0].lower())
+    added: list[str] = []
+    covered_heads: set[str] = set()
+    existing = set(candidates)
+    for head in sorted(heads_wanting):
+        if allowlist is not None and head not in allowlist:
+            continue
+        for line in harvested.get(head, ()):
+            if line in existing or not is_probe_allowed(line, denylist):
+                continue
+            added.append(line)
+            existing.add(line)
+            covered_heads.add(head)
+    if not added:
+        return candidates, unsampled
+    remaining = [
+        command
+        for command in unsampled
+        if command.split()[0].lower() not in covered_heads
+    ]
+    return added + candidates, remaining
 
 
 def _probe(navigator: ModeNavigator, context: ModeContext, command: str) -> ProbeRecord:
