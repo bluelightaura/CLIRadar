@@ -350,3 +350,53 @@ def test_without_a_preference_the_first_description_still_wins() -> None:
     _add_command(commands, "cls", "Второе", Path("b.md"), "ru", "", spoken)
 
     assert commands["cls"].description == "First"
+
+
+def test_a_fence_that_names_another_language_is_not_the_device_cli(tmp_path: Path) -> None:
+    # A project's README fences the shell it wants run. Read as device commands
+    # those arrive in the catalog, and a compare then reports the switch as
+    # missing "pytest" and "export SWITCH_PASSWORD='...'".
+    (tmp_path / "readme.md").write_text(
+        "```bash\npytest\nexport SWITCH_PASSWORD='...'\n```\n"
+        "```yaml\ndevice:\n  host: 10.0.0.1\n```\n"
+        "```text\nshow version\n```\n",
+        encoding="utf-8",
+    )
+
+    assert set(scan_documentation(tmp_path)) == {"show version"}
+
+
+def test_a_line_with_an_arrow_is_a_diagram_not_a_command(tmp_path: Path) -> None:
+    # "ping 172.16.1.101 -> 3 packets transmitted, 3 received" is output a
+    # document quoted, and it carried a lab address into the catalog with it.
+    (tmp_path / "notes.md").write_text(
+        "```\n"
+        "ping 172.16.1.101 -> 3 packets transmitted, 3 received\n"
+        "raw help -> parse_context_help() -> Catalog\n"
+        "show version\n"
+        "```\n",
+        encoding="utf-8",
+    )
+
+    assert set(scan_documentation(tmp_path)) == {"show version"}
+
+
+def test_a_table_is_read_as_commands_only_when_it_says_it_holds_them(tmp_path: Path) -> None:
+    # Every markdown table has pipes in it. Reading them all turned the two
+    # cells of a comparison table into the commands "en" and "ru".
+    (tmp_path / "doc.md").write_text(
+        "| `prefer_language` | по-русски | по-английски |\n"
+        "|---|---|---|\n"
+        "| `en` | 5 | 7063 |\n"
+        "| `ru` | 7056 | 12 |\n"
+        "\n"
+        "| Command | Description |\n"
+        "| --- | --- |\n"
+        "| `show version` | Displays the version |\n",
+        encoding="utf-8",
+    )
+
+    commands = scan_documentation(tmp_path)
+
+    assert set(commands) == {"show version"}
+    assert commands["show version"].description == "Displays the version"

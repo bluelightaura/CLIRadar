@@ -27,7 +27,22 @@ MAX_DOCUMENT_BYTES = 5 * 1024 * 1024
 MAX_PACKED_DOCUMENT_BYTES = 256 * 1024 * 1024
 MAX_EXPANSIONS = 512
 
-FENCE_RE = re.compile(r"^\s*```")
+FENCE_RE = re.compile(r"^\s*```(?P<info>[A-Za-z0-9_+-]*)")
+# Languages a fence declares that are certainly not a device's command line.
+# Markdown lets a block say what it holds, and a manual's own listings say
+# nothing or "text" while a project's README says "bash" over the shell it
+# wants run. Reading those as device commands put "pytest", "pip-audit" and
+# "export SWITCH_PASSWORD='...'" into the catalog, where a compare reports each
+# of them as a command the switch is missing.
+NOT_A_COMMAND_LINE = frozenset(
+    {
+        "bash", "sh", "shell", "zsh", "fish", "console", "shell-session",
+        "python", "py", "python3", "ruby", "perl", "go", "rust", "c", "cpp",
+        "java", "js", "javascript", "ts", "typescript",
+        "yaml", "yml", "json", "toml", "ini", "xml", "html", "css",
+        "diff", "patch", "sql", "make", "makefile", "dockerfile",
+    }
+)
 COMMAND_RE = re.compile(r"^[a-z][a-z0-9-]*(?:\s+\S+)*$")
 PROMPT_COMMAND_RE = re.compile(
     r"^\s*[\w()./@:-]+[>#]\s*(?P<command>[a-z][^\r\n]*)\s*$"
@@ -41,6 +56,15 @@ LABELED_COMMAND_RE = re.compile(
 TABLE_RE = re.compile(
     r"^\s*\|\s*`?(?P<command>[a-z][^|`]+)`?\s*\|\s*(?P<description>[^|]+)",
     re.IGNORECASE,
+)
+# A markdown table is read as a table of commands only when its own header says
+# that is what it is. Every table has pipes in it, and reading them all put the
+# two cells of a comparison table - "| `en` | 5 | 7063 |" - into the catalog as
+# the commands "en" and "ru". A manual naming its column is not a guess.
+# The "|---|---|" rule under a markdown table's header, which is not a row.
+_TABLE_RULE_RE = re.compile(r"^\s*\|[\s:|-]+$")
+TABLE_HEADER_RE = re.compile(
+    r"^\s*\|\s*`?\s*(?:command|syntax|cli|команда|синтаксис)\b", re.IGNORECASE
 )
 COMMAND_DESCRIPTION_RE = re.compile(
     r"^\s*(?P<command>[a-z][^\t]*?)(?:\t+|\s{2,})(?P<description>\S.*?)\s*$"
@@ -89,6 +113,11 @@ STRUCTURED_NOISE_RE = re.compile(
     re.IGNORECASE,
 )
 IGNORED_PREFIXES = ("sudo ", "ssh ", "telnet ")
+# An arrow says the line is showing something turning into something else - a
+# pipeline in a diagram, a before-and-after, the output a ping printed. None of
+# them is a command an operator types, and read as one they arrive in the
+# catalog whole: "ping 172.16.1.101 -> 3 packets transmitted, 3 received".
+ARROW_RE = re.compile(r"(?:->|=>|\u2192|\u21d2)")
 
 
 def _normalize_command(value: str) -> str | None:
@@ -102,6 +131,7 @@ def _normalize_command(value: str) -> str | None:
         or command.endswith((".", ",", ":", ";"))
         or command.startswith(IGNORED_PREFIXES)
         or not COMMAND_RE.fullmatch(command)
+        or ARROW_RE.search(command)
         or len(command.split()) > 32
     ):
         return None
@@ -315,8 +345,9 @@ def _line_candidate(
     *,
     in_fence: bool,
     plain_text: bool,
+    in_command_table: bool = True,
 ) -> tuple[str, str] | None:
-    table_match = TABLE_RE.match(raw_line)
+    table_match = TABLE_RE.match(raw_line) if in_command_table else None
     if table_match:
         return table_match.group("command"), table_match.group("description").strip()
 
@@ -546,15 +577,44 @@ def scan_documentation(
             continue
 
         in_fence = False
+        # Whether the markdown table now being read said it holds commands.
+        # True until a table says otherwise, so a document with no tables and a
+        # plain list of commands behaves exactly as before.
+        in_command_table = True
+        seen_a_table_row = False
+        # A fence that named a language other than the device's own is skipped
+        # whole: its contents are shell, config or code that happens to look
+        # like a command line. See NOT_A_COMMAND_LINE.
+        foreign_fence = False
         for raw_line in text.splitlines():
-            if FENCE_RE.match(raw_line):
-                in_fence = not in_fence
+            fence = FENCE_RE.match(raw_line)
+            if fence:
+                if in_fence:
+                    in_fence, foreign_fence = False, False
+                else:
+                    in_fence = True
+                    foreign_fence = fence.group("info").lower() in NOT_A_COMMAND_LINE
                 continue
+            if foreign_fence:
+                continue
+            # Which table is being read, tracked outside the fence logic: a
+            # table's header names its columns once and the rows below inherit
+            # that. A row standing under no header at all is read as one, which
+            # is how a plain command list keeps working.
+            if not in_fence and raw_line.lstrip().startswith("|"):
+                if TABLE_HEADER_RE.match(raw_line):
+                    in_command_table = True
+                elif not _TABLE_RULE_RE.match(raw_line) and not seen_a_table_row:
+                    in_command_table = False
+                seen_a_table_row = True
+            elif not raw_line.strip():
+                in_command_table, seen_a_table_row = True, False
 
             candidate = _line_candidate(
                 raw_line,
                 in_fence=in_fence,
                 plain_text=path.suffix.lower() == ".txt",
+                in_command_table=in_command_table,
             )
             if not candidate:
                 continue
