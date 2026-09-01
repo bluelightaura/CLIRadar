@@ -102,3 +102,33 @@ def test_an_effect_is_only_read_at_the_head_of_the_cell(excerpt) -> None:
 
     assert english.effect.match("configures the terminal number")
     assert english.domain.search("configures the terminal number integer value")
+
+
+def test_a_card_headed_no_keeps_its_own_name_as_a_keyword(excerpt) -> None:
+    # The line's leading "no" used to be skipped whether or not the heading
+    # carried one, which slid the comparison a token along and left the
+    # command's own name to be marked a value: "no mac-address" was read as
+    # "no <mac-address>", and 55 of this manual's 89 negated forms with it.
+    # Defect 3 in docs/DOCPARSE_DEFECTS_RU.md.
+    card = split_cards(excerpt("negated_card_name"), builtin("l3200_ru"))[0]
+
+    assert card.command == "no mac-address"
+    marked = mark_parameters(card, builtin("l3200_ru"))
+    assert marked[0] == "no mac-address"
+    assert not any(line.startswith("no <") for line in marked)
+    # The word is still a value where the manual asks for one.
+    assert "no mac-address <mac-address>" in marked
+
+
+def test_a_lone_token_in_brackets_is_optional_not_a_choice(excerpt) -> None:
+    # "[ port-id ]" offers nothing to choose between - the brackets make the
+    # parameter optional. Read as an alternative it came out a keyword here and
+    # a value where the same card printed it bare, so one card answered the
+    # same question two ways.
+    card = split_cards(excerpt("optional_not_alternative"), builtin("l3200_ru"))[0]
+
+    _, marks = mark_card(card, builtin("l3200_ru"))
+    port = [mark for mark in marks if mark.token == "port-id"]
+    assert port, "the card must print port-id"
+    assert {mark.kind for mark in port} == {"value"}
+    assert {mark.text for mark in port} == {"<1-65535>"}

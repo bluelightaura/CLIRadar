@@ -10,6 +10,10 @@
     "Параметры",
     "Parameters"
   ],
+  "purpose_sections": [
+    "Назначение",
+    "Command Function"
+  ],
   "parameter_header": "^(?P<indent>\\s*)(?:Пара\\w*|Parameter)(?:\\s+(?P<second>\\S+))?",
   "no_parameters_word": "^\\s*[—–-]?\\s*(?:нет|отсутствуют|none|no\\s+parameters?)\\b",
   "no_parameters_phrase": "не\\s+(?:имеет|принимает|содержит|требует|использует)\\s+(?:\\w+\\s+)?параметр|без\\s+параметров|(?:takes|has|accepts|requires)\\s+no\\s+parameters",

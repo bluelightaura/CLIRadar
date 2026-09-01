@@ -144,3 +144,26 @@ patch-number 指定补丁号 1~100
     assert card.syntax == ["patch patch-number load file-name"]
     assert card.had_parameter_block is True
     assert "patch-number" in card.parameters
+
+
+def test_keeps_the_purpose_block_even_though_it_is_not_fenced(excerpt) -> None:
+    # The two listing blocks are fenced and the purpose block is not, so a
+    # reader that only looks inside fences drops it - which is why every entry
+    # of the catalog used to carry an empty description. See defect 4 in
+    # docs/DOCPARSE_DEFECTS_RU.md.
+    card = split_cards(excerpt("welded_header"), builtin("l3200_ru"))[0]
+
+    assert card.purpose == [
+        (
+            "clock set Команда может быть использована для установки текущей"
+            " даты и времени коммутатора."
+        )
+    ]
+
+
+def test_purpose_keeps_one_line_per_form_of_the_command(excerpt) -> None:
+    card = split_cards(excerpt("purpose_per_form"), builtin("l3200_ru"))[0]
+
+    assert len(card.purpose) == 2
+    assert card.purpose[0].startswith("clock timezone Команды")
+    assert card.purpose[1].startswith("no clock timezone Эта команда")

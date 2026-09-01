@@ -13,6 +13,11 @@
     "Parameter Descriptions",
     "参数说明"
   ],
+  "purpose_sections": [
+    "Command Function",
+    "Command Functionality",
+    "命令功能"
+  ],
   "parameter_header": "^(?P<indent>\\s*)(?:Parameter|参数)(?:\\s+(?P<second>\\S+))?",
   "no_parameters_word": "^\\s*[—–-]?\\s*(?:none|no\\s+parameters?|无)\\b",
   "no_parameters_phrase": "(?:takes|has|accepts|requires)\\s+no\\s+parameters|no\\s+parameters?\\s+(?:are\\s+)?(?:required|needed)",

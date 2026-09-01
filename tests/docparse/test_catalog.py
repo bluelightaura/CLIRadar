@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import json
 
-from cliradar.docparse import build_catalog, read_card, split_cards
+from cliradar.docparse import build_catalog, purpose_for, read_card, split_cards
+from cliradar.docparse.profile import builtin
 
 
 def test_record_carries_the_syntax_as_printed_and_as_read(excerpt) -> None:
@@ -43,3 +44,32 @@ def test_catalog_serialises_with_the_manuals_own_alphabet(excerpt) -> None:
     assert payload["recognised"] is False
     assert payload["commands"][0]["command"] == "command authorization aaa method"
     assert "привилегий" in catalog.to_json() or "уровень" in catalog.to_json()
+
+
+def test_purpose_is_picked_for_the_form_it_was_written_about(excerpt) -> None:
+    # The card carries one bullet per form. Handing "no clock timezone" the
+    # bullet about "clock timezone" would describe the opposite of what the
+    # command does.
+    card = split_cards(excerpt("purpose_per_form"), builtin("l3200_ru"))[0]
+
+    positive = purpose_for(card, "clock timezone time-zone-name add offset")
+    negative = purpose_for(card, "no clock timezone")
+
+    assert positive.startswith("Команды могут использоваться")
+    assert negative.startswith("Эта команда может быть использована для сброса")
+    # The command's own words open the bullet and are already the catalog key.
+    assert "clock timezone" not in positive
+
+
+def test_purpose_falls_back_to_the_whole_block(excerpt) -> None:
+    card = split_cards(excerpt("purpose_per_form"), builtin("l3200_ru"))[0]
+
+    # A command the block says nothing about gets the block, not silence.
+    assert purpose_for(card, "show running-config").startswith("clock timezone Команды")
+    assert purpose_for(card).startswith("clock timezone Команды")
+
+
+def test_record_carries_the_card_description(excerpt) -> None:
+    card = split_cards(excerpt("welded_header"), builtin("l3200_ru"))[0]
+
+    assert read_card(card, builtin("l3200_ru")).description.startswith("clock set Команда")

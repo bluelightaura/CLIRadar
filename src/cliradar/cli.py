@@ -281,6 +281,10 @@ class ScanOutcome:
     # How much the link fought back: transports rebuilt mid-scan and connect
     # attempts spent getting on. Zeros on a healthy run.
     resilience: dict[str, int] = field(default_factory=dict)
+    # Manuals the documentation reader passed over, and why. A run that read
+    # one of two manuals prints the same command count as one that read both,
+    # so the difference has to be carried out and said.
+    skipped_documents: list[tuple[Path, str]] = field(default_factory=list)
 
 
 def _session_resilience(session: object) -> dict[str, int]:
@@ -406,8 +410,17 @@ def build_catalog(
                 )
             )
 
+    # A manual this reader declines contributes nothing and says nothing, so a
+    # folder of two manuals where only one was read prints the same success
+    # line as one where both were. Collected here and reported by the caller.
+    skipped_documents: list[tuple[Path, str]] = []
+
     documented = (
-        scan_documentation(docs_path, on_progress=_docs_tick)
+        scan_documentation(
+            docs_path,
+            on_progress=_docs_tick,
+            on_skip=lambda path, reason: skipped_documents.append((path, reason)),
+        )
         if mode in {"compare", "docs"}
         else {}
     )
@@ -429,7 +442,14 @@ def build_catalog(
         }
         write_catalog(catalog, destination)
         write_exports(catalog, config)
-        return ScanOutcome(destination, None, len(catalog.commands), 0, True)
+        return ScanOutcome(
+            destination,
+            None,
+            len(catalog.commands),
+            0,
+            True,
+            skipped_documents=skipped_documents,
+        )
 
     import paramiko
 
@@ -705,6 +725,7 @@ def build_catalog(
             block_reports=len(block_reports),
             blocks_path=block_reports[0].parent if block_reports else None,
             resilience=resilience,
+            skipped_documents=skipped_documents,
         )
 
     catalog.scan = crawl_result.to_dict()
@@ -732,6 +753,7 @@ def build_catalog(
         config_summary=catalog.configuration or None,
         verify_skipped=verify_skipped,
         resilience=resilience,
+        skipped_documents=skipped_documents,
     )
 
 
@@ -1016,6 +1038,13 @@ def _execute(args: argparse.Namespace, cancellable: bool = False) -> int:
     if cancelled["flag"] and not args.quiet:
         print(
             "отменено — записан частичный каталог (scan incomplete)",
+            file=sys.stderr,
+        )
+    # Said before the counts, and on stderr, because it changes what the counts
+    # mean: a manual that gave nothing is not visible in a number of commands.
+    for skipped_path, reason in outcome.skipped_documents:
+        print(
+            f"внимание: {skipped_path} не дал ни одной команды - {reason}",
             file=sys.stderr,
         )
     if not args.quiet:

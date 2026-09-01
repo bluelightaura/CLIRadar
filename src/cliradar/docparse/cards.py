@@ -48,6 +48,11 @@ class Card:
     command: str
     syntax: list[str] = field(default_factory=list)
     parameters: dict[str, str] = field(default_factory=dict)
+    # What the card says the command is for, as printed. Unlike the two blocks
+    # above this is prose, so it is kept line by line and joined by the reader
+    # that needs it - a manual writes it as one paragraph or as a bullet per
+    # form of the command, and the second shape carries which form it is about.
+    purpose: list[str] = field(default_factory=list)
     # Whether the card carried a parameter block at all, which is not the same
     # as its having produced rows: an unreadable table must not be mistaken for
     # a command that takes no parameters.
@@ -160,8 +165,23 @@ def split_cards(text: str, profile: Profile | None = None) -> list[Card]:
                     or section in profile.parameter_sections
                 ):
                     current.had_block = True
+                continue
+            # The purpose block is prose, and a manual is free to print it
+            # without a fence around it - the L3200 reference does, while the
+            # Centec conversion fences it like every other block. Read outside
+            # a fence as well as in, which the two listing blocks must not be:
+            # there an unfenced line is a page number or a stray heading.
+            if current is not None and section in profile.purpose_sections:
+                text_line = line.strip().lstrip("-*\u2219 ").strip()
+                if text_line:
+                    current.purpose.append(text_line)
             continue
         if current is None:
+            continue
+        if section in profile.purpose_sections:
+            text_line = line.strip().lstrip("-*\u2219 ").strip()
+            if text_line:
+                current.purpose.append(text_line)
             continue
         if section in profile.syntax_sections:
             form = command_form(line)

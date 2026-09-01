@@ -44,6 +44,9 @@ class CommandRecord:
     """One card, read."""
 
     command: str
+    # What the card's purpose block says the command is for. Empty when the
+    # manual printed no such block under this heading.
+    description: str = ""
     syntax: list[str] = field(default_factory=list)
     marked: list[str] = field(default_factory=list)
     parameters: list[Parameter] = field(default_factory=list)
@@ -82,6 +85,46 @@ class Catalog:
 
 
 UNUSED = "unused"
+
+
+def _leading_match(purpose_line: str, command: str) -> int:
+    """How many of the command's own words this line opens with.
+
+    A manual that prints one bullet per form of the command opens each with
+    that form - "no clock timezone Эта команда..." - so the bullet says which
+    command it is about before it says anything else. Alternatives are written
+    the way the syntax writes them, so "auth-degenerate enable|disable" has to
+    count as a match for "auth-degenerate enable".
+    """
+    wanted = command.split()
+    matched = 0
+    for index, word in enumerate(purpose_line.split()):
+        if index >= len(wanted):
+            break
+        options = {part for part in word.strip("{}[]").split("|") if part}
+        if wanted[index] not in options:
+            break
+        matched += 1
+    return matched
+
+
+def purpose_for(card: Card, command: str = "") -> str:
+    """What the card says this command is for, in one line.
+
+    With no command named, or none the card's purpose block distinguishes, the
+    whole block is returned joined. Naming one picks the bullet written about
+    it and drops the command words the bullet opens with, which are already in
+    the catalog key and would otherwise be printed twice.
+    """
+    lines = [line for line in card.purpose if line.strip()]
+    if not lines:
+        return ""
+    if command:
+        scored = [(_leading_match(line, command), index, line) for index, line in enumerate(lines)]
+        best, _, line = max(scored)
+        if best:
+            return " ".join(line.split()[best:]).strip() or line.strip()
+    return " ".join(lines).strip()
 
 
 def read_card(card: Card, profile: Profile | None = None) -> CommandRecord:
@@ -130,6 +173,7 @@ def read_card(card: Card, profile: Profile | None = None) -> CommandRecord:
     )
     return CommandRecord(
         command=card.command,
+        description=purpose_for(card),
         syntax=list(card.syntax),
         marked=marked,
         parameters=parameters,

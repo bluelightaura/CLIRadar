@@ -66,6 +66,30 @@ def _depths(line: str) -> list[int]:
     return depths
 
 
+def _offers_a_choice(line: str, start: int, end: int) -> bool:
+    """Does the group enclosing this token hold more than one thing?
+
+    Asked of the group, not of the token, and only of a separator standing at
+    the group's own depth: a pipe inside a nested group belongs to that one.
+    """
+    depths = _depths(line)
+    if start >= len(depths):
+        return False
+    depth = depths[start]
+    if depth == 0:
+        return False
+    left = start
+    while left > 0 and depths[left - 1] >= depth:
+        left -= 1
+    right = end
+    while right < len(line) and depths[right] >= depth:
+        right += 1
+    return any(
+        char == "|" and depths[index] == depth
+        for index, char in enumerate(line[left:right], start=left)
+    )
+
+
 def _is_bare_alternative(line: str, start: int, end: int) -> bool:
     """Does this token stand alone as one choice among braced alternatives?
 
@@ -74,11 +98,19 @@ def _is_bare_alternative(line: str, start: int, end: int) -> bool:
     each one does, which reads like any other row - so the syntax itself has to
     settle it, and a token with nothing but a separator on either side is a
     literal choice rather than a value to be supplied.
+
+    A group holding one thing is not that. "[ port-id ]" says the operator may
+    supply a port number or leave it out - the brackets make it optional, and
+    optional is not a choice between spellings. Reading it as one marked the
+    same row a keyword here and a value where the manual printed it bare, so
+    one card answered the same question two ways - defect 3 in
+    docs/DOCPARSE_DEFECTS_RU.md.
     """
     before = line[:start].rstrip()
     after = line[end:].lstrip()
     if bool(before) and before[-1] in "{[|" and bool(after) and after[0] in "}]|":
-        return True
+        touches = before[-1] == "|" or after[0] == "|"
+        return touches or _offers_a_choice(line, start, end)
     # An alternative this manual writes without braces: "cipher | plain". The
     # pipe alone says these are two spellings of one choice, and a choice is
     # typed verbatim.
@@ -160,7 +192,13 @@ def _command_prefix(command: str, line: str, matches: list) -> int:
     """
     wanted = TOKEN_RE.findall(command)
     printed = [m.group(0) for m in matches]
-    start = 1 if printed[:1] == ["no"] else 0
+    # A card documents the negative form of its command alongside the positive
+    # one, so the line may open with a "no" the heading does not carry. Skipped
+    # only when the heading does not carry it: a card headed "no mac-address"
+    # matches that "no" itself, and skipping it slid the comparison one token
+    # along, failed on the first word and left the command's own name to be
+    # marked a value - "no mac-address" was read as "no <mac-address>".
+    start = 1 if printed[:1] == ["no"] and wanted[:1] != ["no"] else 0
     matched = 0
     while matched < len(wanted) and start + matched < len(printed):
         if printed[start + matched] != wanted[matched]:

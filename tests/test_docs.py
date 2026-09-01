@@ -274,3 +274,34 @@ def test_a_file_that_is_not_really_a_docx_is_skipped(tmp_path: Path) -> None:
     (tmp_path / "broken.docx").write_bytes(b"not a zip at all")
 
     assert scan_documentation(tmp_path) == {}
+
+
+def test_reports_a_manual_that_yielded_nothing(tmp_path: Path) -> None:
+    # A .docx no profile can read is otherwise indistinguishable from one that
+    # was read: the run prints a command count either way. See defect 1 in
+    # docs/DOCPARSE_DEFECTS_RU.md.
+    (tmp_path / "readable.md").write_text("```\nshow version\n```\n", encoding="utf-8")
+    (tmp_path / "manual.docx").write_bytes(b"not a zip at all")
+    skipped: list[tuple[Path, str]] = []
+
+    commands = scan_documentation(tmp_path, on_skip=lambda p, why: skipped.append((p, why)))
+
+    assert set(commands) == {"show version"}
+    assert [p.name for p, _ in skipped] == ["manual.docx"]
+    assert "архив" in skipped[0][1]
+
+
+def test_reports_a_file_read_without_finding_a_command(tmp_path: Path) -> None:
+    (tmp_path / "prose.md").write_text("Просто абзац текста без команд.\n", encoding="utf-8")
+    skipped: list[tuple[Path, str]] = []
+
+    scan_documentation(tmp_path, on_skip=lambda p, why: skipped.append((p, why)))
+
+    assert [p.name for p, _ in skipped] == ["prose.md"]
+    assert "не дал ни одной команды" in skipped[0][1]
+
+
+def test_skip_callback_is_optional(tmp_path: Path) -> None:
+    (tmp_path / "manual.docx").write_bytes(b"not a zip at all")
+    # No callback must not raise.
+    assert scan_documentation(tmp_path) == {}

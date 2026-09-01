@@ -25,7 +25,14 @@ from __future__ import annotations
 
 from . import docx
 from .cards import Card, is_card_reference, split_cards
-from .catalog import Catalog, CommandRecord, Parameter, build_catalog, read_card
+from .catalog import (
+    Catalog,
+    CommandRecord,
+    Parameter,
+    build_catalog,
+    purpose_for,
+    read_card,
+)
 from .marking import mark_card, mark_parameters, placeholder
 from .profile import Profile, builtin, load
 from .table import parameter_rows
@@ -45,6 +52,7 @@ __all__ = [
     "mark_parameters",
     "parameter_rows",
     "placeholder",
+    "purpose_for",
     "read_card",
     "split_cards",
 ]

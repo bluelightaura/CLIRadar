@@ -147,6 +147,10 @@ class Profile:
     # the only way to tell it from content is to have been told the list. A
     # manual that arrives already marked up leaves this empty.
     sections: tuple[str, ...] = ()
+    # The block that says what the command is for. Read as prose, not as a
+    # listing: a manual prints it as bullets or as a paragraph, fenced or not,
+    # and either way it is the one sentence the catalog can show an operator.
+    purpose_sections: tuple[str, ...] = ()
     # The running header and footer of such a conversion. The footer is not
     # merely noise to drop: it delimits the page, and the page is what puts the
     # document's two layers back into reading order - see docx.reading_order.
@@ -192,6 +196,7 @@ def from_dict(data: dict) -> Profile:
         heading=re.compile(data["heading"]),
         syntax_sections=tuple(data["syntax_sections"]),
         parameter_sections=tuple(data["parameter_sections"]),
+        purpose_sections=tuple(data.get("purpose_sections", ())),
         parameter_header=re.compile(data["parameter_header"]),
         no_parameters_word=compile_(data["no_parameters_word"]),
         no_parameters_phrase=compile_(data["no_parameters_phrase"]),
