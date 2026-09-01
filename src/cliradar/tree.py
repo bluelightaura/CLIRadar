@@ -35,7 +35,7 @@ class ContextNode:
     commands: int  # commands recorded in THIS context alone
     queries: int  # help queries THIS context cost the last scan
     complete: bool
-    children: list["ContextNode"] = field(default_factory=list)
+    children: list[ContextNode] = field(default_factory=list)
 
     @property
     def label(self) -> str:
@@ -148,7 +148,7 @@ def format_duration(seconds: float) -> str:
     """A compact "~2m30s" / "~45s" / "<1s" badge for a tree row."""
     if seconds < 1:
         return "<1s"
-    total = int(round(seconds))
+    total = round(seconds)
     minutes, secs = divmod(total, 60)
     if minutes == 0:
         return f"~{secs}s"

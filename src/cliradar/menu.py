@@ -533,7 +533,7 @@ def _catalog_and_transport(config_path: Path) -> tuple[Path, str]:
         output = data.get("output", {}) if isinstance(data, dict) else {}
         if isinstance(output, dict) and output.get("device_catalog"):
             catalog = Path(str(output["device_catalog"]))
-    except Exception:  # noqa: BLE001 - display path only, must never crash the menu
+    except Exception:  # noqa: BLE001, S110  # nosec B110 - display path, must never crash
         pass
     return catalog, transport
 
@@ -1174,7 +1174,7 @@ def _ensure_password(config_path: Path) -> None:
     try:
         secret = getpass.getpass(f"Password for {_target_line(config_path)} ({env}): ")
     except (EOFError, KeyboardInterrupt):
-        secret = ""
+        secret = ""  # nosec B105 - nothing typed
     if secret:
         os.environ[env] = secret
 
@@ -1298,12 +1298,12 @@ def _crash_notice(exc: BaseException, where: str) -> None:
 def _launch_file_manager(path: Path) -> bool:
     """Best-effort open of a folder in the desktop file manager; never raises."""
     import shutil
-    import subprocess
+    import subprocess  # nosec B404 - fixed opener, no shell, no user string
 
     for opener in ("xdg-open", "open"):
         if shutil.which(opener):
             try:
-                subprocess.Popen(
+                subprocess.Popen(  # nosec B603 - literal opener, path is ours, shell=False
                     [opener, str(path)],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
@@ -1524,7 +1524,7 @@ def _render_setup(
 def _draw_connect_progress(host: str, port: int, frac: float) -> None:
     """Repaint a single progress frame while the reach test runs."""
     th = _theme()
-    filled = int(round(frac * _CONNECT_BAR_WIDTH))
+    filled = round(frac * _CONNECT_BAR_WIDTH)
     meter = "█" * filled + "░" * (_CONNECT_BAR_WIDTH - filled)
     top = _c("╭" + "─" * (_WIDTH + 2) + "╮", *th["border"])
     bot = _c("╰" + "─" * (_WIDTH + 2) + "╯", *th["border"])
@@ -1559,7 +1559,7 @@ def _edit_field(config_path: Path, fields: dict[str, object], key: str) -> None:
         try:
             secret = getpass.getpass(f"{t('f_password')} ({env}): ")
         except (EOFError, KeyboardInterrupt):
-            secret = ""
+            secret = ""  # nosec B105 - nothing typed
         if secret:
             os.environ[env] = secret
         sys.stdout.write("\x1b[?1049h\x1b[?25l")
@@ -1670,7 +1670,9 @@ def _setup_screen(
                     str(fields.get("transport", "ssh")), 22))
                 ok, note = probe_reachable(
                     host, port, timeout=6.0,
-                    on_tick=lambda frac: _draw_connect_progress(host, port, frac),
+                    on_tick=lambda frac, host=host, port=port: _draw_connect_progress(
+                        host, port, frac
+                    ),
                 )
                 trusted = True
                 if ok and str(fields.get("transport", "ssh")) == "ssh":

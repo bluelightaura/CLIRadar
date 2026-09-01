@@ -593,3 +593,79 @@ def test_firmware_stamp_drops_credentials_from_a_configuration_dump() -> None:
     assert "interface eth0" in output
     for secret in ("$1$abc$Xyz123", "070C285F4D06", "s3cr3t"):
         assert secret not in output
+
+
+def _resilience_config(tmp_path: Path, destination: Path) -> Path:
+    """A minimal scan config pointing every artifact into the tmp tree."""
+    config = tmp_path / "config.yml"
+    config.write_text(
+        f"""
+device:
+  host: switch.lab
+  username: auditor
+output:
+  documentation_catalog: {(tmp_path / "cli_doc.yml").as_posix()}
+  device_catalog: {destination.as_posix()}
+  comparison_catalog: {(tmp_path / "cli_compare.yml").as_posix()}
+  html_report: {(tmp_path / "report.html").as_posix()}
+  raw_log: {(tmp_path / "session.log").as_posix()}
+  tree_catalog: {(tmp_path / "commands_tree.yml").as_posix()}
+  human_catalog: {(tmp_path / "commands_human.yml").as_posix()}
+  config_tree: {(tmp_path / "config_tree.yml").as_posix()}
+""",
+        encoding="utf-8",
+    )
+    return config
+
+
+class FlappingSession(FakeSession):
+    """A session that had to fight the link to stay up, and counted it."""
+
+    def __init__(self, config: dict[str, object], raw_log: object = None) -> None:
+        super().__init__(config, raw_log)
+        self.reconnects = 2
+        self.connect_retries_used = 1
+
+
+def test_a_flapping_link_is_counted_in_the_catalog_and_said_out_loud(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # An incomplete context reads differently when the transport was rebuilt
+    # under it, so the session's own counters travel with the scan instead of
+    # dying with the session.
+    monkeypatch.setattr("cliradar.session.SwitchSession", FlappingSession)
+    destination = tmp_path / "cli_real.yml"
+    config = _resilience_config(tmp_path, destination)
+
+    code = run(["audit", "--config", str(config), "--enter-modes"])
+
+    assert code == ExitCode.OK
+    content = yaml.safe_load(destination.read_text(encoding="utf-8"))
+    assert content["scan"]["resilience"] == {
+        "reconnects": 2,
+        "connect_retries_used": 1,
+    }
+    err = capsys.readouterr().err
+    assert "the link was not steady" in err
+    assert "2 reconnect(s)" in err and "1 connect retry(ies)" in err
+
+
+def test_a_steady_link_reports_zeros_and_says_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The counters are published on every run - a plain crawl included, and a
+    # transport that never learned to reconnect included - but a healthy run
+    # must not spend a line of the summary on them.
+    monkeypatch.setattr("cliradar.session.SwitchSession", FakeSession)
+    destination = tmp_path / "cli_real.yml"
+    config = _resilience_config(tmp_path, destination)
+
+    code = run(["audit", "--config", str(config)])
+
+    assert code == ExitCode.OK
+    content = yaml.safe_load(destination.read_text(encoding="utf-8"))
+    assert content["scan"]["resilience"] == {
+        "reconnects": 0,
+        "connect_retries_used": 0,
+    }
+    assert "the link was not steady" not in capsys.readouterr().err

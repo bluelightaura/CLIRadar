@@ -1,12 +1,30 @@
 from __future__ import annotations
 
 import re
+import xml.etree.ElementTree as ET  # nosec B405 - operator's own manual, not network input
+import zipfile
+from dataclasses import dataclass, field
 from pathlib import Path
 
+from .docparse import (
+    docx,
+    is_card_reference,
+    mark_parameters,
+    purpose_for,
+    repair_welded_tokens,
+    split_cards,
+)
+from .docparse.profile import Profile, available
 from .models import CommandEntry
 
-SUPPORTED_SUFFIXES = {".md", ".txt", ".rst"}
+SUPPORTED_SUFFIXES = {".md", ".txt", ".rst", ".docx"}
 MAX_DOCUMENT_BYTES = 5 * 1024 * 1024
+# A .docx is a zip, so its size on disk says little about the work reading it
+# costs: the manual this reader was written for is 5 MB packed and 113 MB of
+# XML unpacked. The archive is checked against what it claims to hold before
+# any of it is parsed, and the text it yields is then held to the same limit
+# every other document is.
+MAX_PACKED_DOCUMENT_BYTES = 256 * 1024 * 1024
 MAX_EXPANSIONS = 512
 
 FENCE_RE = re.compile(r"^\s*```")
@@ -334,10 +352,92 @@ def _add_command(
         entry.description = description
 
 
-def scan_documentation(root: Path, on_progress=None) -> dict[str, CommandEntry]:
+@dataclass
+class _Skipped:
+    """Files a documentation run read nothing out of, and why.
+
+    A run reports how many commands it wrote and nothing about the manuals it
+    passed over, so a folder of two manuals where only one was read looks
+    exactly like a folder of two manuals where both were. This collects the
+    refusals so the caller can say which file gave nothing.
+    """
+
+    entries: list[tuple[Path, str]] = field(default_factory=list)
+
+    def add(self, path: Path, reason: str) -> None:
+        self.entries.append((path, reason))
+
+    def __bool__(self) -> bool:
+        return bool(self.entries)
+
+
+def _refuse(report: _Skipped | None, path: Path, reason: str) -> None:
+    """Record why a document gave nothing.
+
+    Returns None so a caller can write ``return _refuse(...)`` and say the
+    refusal and its reason in one line.
+    """
+    if report is not None:
+        report.add(path, reason)
+
+
+def _read_docx(path: Path, report: _Skipped | None = None) -> tuple[str, Profile] | None:
+    """A .docx manual as text, with the profile it took to read it.
+
+    Unlike a text file, this one cannot be read before a profile is chosen:
+    telling a block title from a line of prose in a paged conversion needs the
+    list of block names up front. So the profiles carrying such a list are
+    tried in turn and the first the document earns wins; one that carries none
+    cannot read a .docx and is not offered the chance. Nothing is returned for
+    a document no profile earns - there is no line reader to fall back to when
+    the file is a zip.
+
+    Every way of returning nothing says why into ``report``. A manual this
+    reader declines is otherwise indistinguishable from one it read: the run
+    prints a command count either way, and a count of 11986 looks like success
+    even when one of the two manuals in the folder contributed none of it.
+    """
+    try:
+        with zipfile.ZipFile(path) as archive:
+            packed = sum(item.file_size for item in archive.infolist())
+    except (zipfile.BadZipFile, OSError):
+        return _refuse(report, path, "не читается как .docx (повреждённый архив)")
+    if packed > MAX_PACKED_DOCUMENT_BYTES:
+        return _refuse(report, path, f"распакованный размер {packed} Б превышает предел")
+    offered = False
+    for profile in available():
+        if not profile.sections:
+            continue
+        offered = True
+        try:
+            text = docx.read(path, profile)
+        except (zipfile.BadZipFile, KeyError, ET.ParseError, OSError):
+            return _refuse(report, path, "XML документа не разбирается")
+        if len(text.encode("utf-8", "ignore")) > MAX_DOCUMENT_BYTES:
+            return _refuse(report, path, "текст документа превышает предел размера")
+        if is_card_reference(split_cards(text, profile), profile):
+            return text, profile
+    return _refuse(
+        report,
+        path,
+        "ни один профиль не опознал документ как справочник карточек"
+        if offered
+        else "нет ни одного профиля, умеющего читать .docx",
+    )
+
+
+def scan_documentation(root: Path, on_progress=None, on_skip=None) -> dict[str, CommandEntry]:
+    """Every command the documentation under ``root`` describes.
+
+    ``on_skip`` is handed ``(path, reason)`` for each file that yielded no
+    command, whether this reader declined it or read it and found nothing. A
+    run is otherwise silent about the difference, and silence there reads as
+    success - see docs/DOCPARSE_DEFECTS_RU.md, defect 1.
+    """
     commands: dict[str, CommandEntry] = {}
     if not root.exists():
         return commands
+    skipped = _Skipped()
 
     candidates = [root] if root.is_file() else root.rglob("*")
     paths = sorted(
@@ -346,7 +446,10 @@ def scan_documentation(root: Path, on_progress=None) -> dict[str, CommandEntry]:
         if item.is_file()
         and not item.is_symlink()
         and item.suffix.lower() in SUPPORTED_SUFFIXES
-        and item.stat().st_size <= MAX_DOCUMENT_BYTES
+        and (
+            item.suffix.lower() == ".docx"
+            or item.stat().st_size <= MAX_DOCUMENT_BYTES
+        )
     )
     total = len(paths)
     for index, path in enumerate(paths):
@@ -354,8 +457,46 @@ def scan_documentation(root: Path, on_progress=None) -> dict[str, CommandEntry]:
         # the caller draw "reading file k/N" so a docs run visibly progresses.
         if callable(on_progress):
             on_progress(index, total, path.name)
-        text = path.read_text(encoding="utf-8", errors="replace")
+        if path.suffix.lower() == ".docx":
+            read = _read_docx(path, skipped)
+            if read is None:
+                continue
+            text, docx_profile = read
+        else:
+            text, docx_profile = path.read_text(encoding="utf-8", errors="replace"), None
         if path.suffix.lower() == ".txt" and COMPACT_REFERENCE_MARKER_RE.search(text):
+            skipped.add(path, "сжатый справочник без пробелов - разбору не поддаётся")
+            continue
+        # A manual written as one card per command is read as that structure.
+        # The line reader below cannot tell a syntax listing from the parameter
+        # table beside it or the worked example beneath it, and on a document of
+        # this shape that difference is most of the catalog.
+        # Each vendor names the blocks differently; the reading is the same.
+        # The profiles are tried in turn and the first the document earns is
+        # used - see cliradar.docparse.profile.
+        read_as_cards = False
+        for profile in [docx_profile] if docx_profile else available():
+            cards = split_cards(text, profile)
+            if not is_card_reference(cards, profile):
+                continue
+            # The conversion welds two words into one often enough to matter,
+            # and only the document as a whole can say which - see
+            # repair_welded_tokens. Done before marking so the table rows the
+            # weld hid are found.
+            repair_welded_tokens(cards)
+            for card in cards:
+                for syntax in mark_parameters(card, profile):
+                    for command in _expand_syntax(syntax):
+                        # The card's purpose block, picked for this form of the
+                        # command. Passing "" here is what left every entry of
+                        # the catalog without a description - defect 4 in
+                        # docs/DOCPARSE_DEFECTS_RU.md.
+                        _add_command(
+                            commands, command, purpose_for(card, command), path
+                        )
+            read_as_cards = True
+            break
+        if read_as_cards:
             continue
         structured = _extract_structured_syntax(text) if path.suffix.lower() == ".txt" else []
         if structured:
@@ -366,6 +507,7 @@ def scan_documentation(root: Path, on_progress=None) -> dict[str, CommandEntry]:
         if path.suffix.lower() == ".txt" and REFERENCE_MARKER_RE.search(text):
             # A converted reference with destroyed spacing (for example
             # "Форматкоманды") cannot be parsed reliably as a plain command list.
+            skipped.add(path, "конверсия с уничтоженными пробелами")
             continue
 
         in_fence = False
@@ -383,6 +525,15 @@ def scan_documentation(root: Path, on_progress=None) -> dict[str, CommandEntry]:
                 continue
             for command in _expand_syntax(candidate[0]):
                 _add_command(commands, command, candidate[1], path)
+    for path in paths:
+        marker = f"documentation:{path.as_posix()}"
+        if any(marker in entry.source for entry in commands.values()):
+            continue
+        if not any(seen == path for seen, _ in skipped.entries):
+            skipped.add(path, "прочитан, но не дал ни одной команды")
+    if callable(on_skip):
+        for path, reason in skipped.entries:
+            on_skip(path, reason)
     if callable(on_progress) and total:
         on_progress(total, total, "")  # a final full tick closes the bar
     return commands
