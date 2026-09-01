@@ -1,12 +1,22 @@
 from __future__ import annotations
 
 import re
+import xml.etree.ElementTree as ET  # nosec B405 - operator's own manual, not network input
+import zipfile
 from pathlib import Path
 
+from .docparse import docx, is_card_reference, mark_parameters, split_cards
+from .docparse.profile import Profile, available
 from .models import CommandEntry
 
-SUPPORTED_SUFFIXES = {".md", ".txt", ".rst"}
+SUPPORTED_SUFFIXES = {".md", ".txt", ".rst", ".docx"}
 MAX_DOCUMENT_BYTES = 5 * 1024 * 1024
+# A .docx is a zip, so its size on disk says little about the work reading it
+# costs: the manual this reader was written for is 5 MB packed and 113 MB of
+# XML unpacked. The archive is checked against what it claims to hold before
+# any of it is parsed, and the text it yields is then held to the same limit
+# every other document is.
+MAX_PACKED_DOCUMENT_BYTES = 256 * 1024 * 1024
 MAX_EXPANSIONS = 512
 
 FENCE_RE = re.compile(r"^\s*```")
@@ -334,6 +344,38 @@ def _add_command(
         entry.description = description
 
 
+def _read_docx(path: Path) -> tuple[str, Profile] | None:
+    """A .docx manual as text, with the profile it took to read it.
+
+    Unlike a text file, this one cannot be read before a profile is chosen:
+    telling a block title from a line of prose in a paged conversion needs the
+    list of block names up front. So the profiles carrying such a list are
+    tried in turn and the first the document earns wins; one that carries none
+    cannot read a .docx and is not offered the chance. Nothing is returned for
+    a document no profile earns - there is no line reader to fall back to when
+    the file is a zip.
+    """
+    try:
+        with zipfile.ZipFile(path) as archive:
+            packed = sum(item.file_size for item in archive.infolist())
+    except (zipfile.BadZipFile, OSError):
+        return None
+    if packed > MAX_PACKED_DOCUMENT_BYTES:
+        return None
+    for profile in available():
+        if not profile.sections:
+            continue
+        try:
+            text = docx.read(path, profile)
+        except (zipfile.BadZipFile, KeyError, ET.ParseError, OSError):
+            return None
+        if len(text.encode("utf-8", "ignore")) > MAX_DOCUMENT_BYTES:
+            return None
+        if is_card_reference(split_cards(text, profile), profile):
+            return text, profile
+    return None
+
+
 def scan_documentation(root: Path, on_progress=None) -> dict[str, CommandEntry]:
     commands: dict[str, CommandEntry] = {}
     if not root.exists():
@@ -346,7 +388,10 @@ def scan_documentation(root: Path, on_progress=None) -> dict[str, CommandEntry]:
         if item.is_file()
         and not item.is_symlink()
         and item.suffix.lower() in SUPPORTED_SUFFIXES
-        and item.stat().st_size <= MAX_DOCUMENT_BYTES
+        and (
+            item.suffix.lower() == ".docx"
+            or item.stat().st_size <= MAX_DOCUMENT_BYTES
+        )
     )
     total = len(paths)
     for index, path in enumerate(paths):
@@ -354,8 +399,34 @@ def scan_documentation(root: Path, on_progress=None) -> dict[str, CommandEntry]:
         # the caller draw "reading file k/N" so a docs run visibly progresses.
         if callable(on_progress):
             on_progress(index, total, path.name)
-        text = path.read_text(encoding="utf-8", errors="replace")
+        if path.suffix.lower() == ".docx":
+            read = _read_docx(path)
+            if read is None:
+                continue
+            text, docx_profile = read
+        else:
+            text, docx_profile = path.read_text(encoding="utf-8", errors="replace"), None
         if path.suffix.lower() == ".txt" and COMPACT_REFERENCE_MARKER_RE.search(text):
+            continue
+        # A manual written as one card per command is read as that structure.
+        # The line reader below cannot tell a syntax listing from the parameter
+        # table beside it or the worked example beneath it, and on a document of
+        # this shape that difference is most of the catalog.
+        # Each vendor names the blocks differently; the reading is the same.
+        # The profiles are tried in turn and the first the document earns is
+        # used - see cliradar.docparse.profile.
+        read_as_cards = False
+        for profile in [docx_profile] if docx_profile else available():
+            cards = split_cards(text, profile)
+            if not is_card_reference(cards, profile):
+                continue
+            for card in cards:
+                for syntax in mark_parameters(card, profile):
+                    for command in _expand_syntax(syntax):
+                        _add_command(commands, command, "", path)
+            read_as_cards = True
+            break
+        if read_as_cards:
             continue
         structured = _extract_structured_syntax(text) if path.suffix.lower() == ".txt" else []
         if structured:
