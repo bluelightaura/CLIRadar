@@ -7,22 +7,22 @@ from cliradar import menu
 from cliradar.menu import (
     _CONFIG_KEY,
     _EXEC_KEY,
+    _GATED_KEYS,
     _ITEMS,
     ContextRef,
     MenuSelection,
     RunTarget,
-    _GATED_KEYS,
     _catalog_and_transport,
     _discover_targets,
-    _edit_field,
-    _password_is_set,
-    _render_setup,
     _disp_width,
+    _edit_field,
     _fallback_menu,
     _flatten_map,
+    _password_is_set,
     _render,
     _render_map,
     _render_picker,
+    _render_setup,
     _selection_for,
     _strip_ansi,
     _target_label,
@@ -534,7 +534,7 @@ def test_ensure_host_key_rejects_on_anything_else(tmp_path, monkeypatch) -> None
     monkeypatch.setattr(menu, "_read_key", lambda: "n")
     cfg = tmp_path / "config.yml"
     cfg.write_text("")
-    ok, note = menu._ensure_host_key(cfg, {}, "10.0.0.1", 22)
+    ok, _note = menu._ensure_host_key(cfg, {}, "10.0.0.1", 22)
     assert ok is False
     assert not (tmp_path / "known_hosts").exists()  # nothing was written
 
@@ -553,7 +553,7 @@ def test_ensure_host_key_skips_the_question_when_already_pinned(
     cfg = tmp_path / "config.yml"
     cfg.write_text("")
     fields = {"known_hosts": str(known)}
-    ok, note = menu._ensure_host_key(cfg, fields, "10.0.0.1", 22)
+    ok, _note = menu._ensure_host_key(cfg, fields, "10.0.0.1", 22)
     assert ok is True
 
 

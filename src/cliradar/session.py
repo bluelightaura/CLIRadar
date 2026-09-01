@@ -110,7 +110,7 @@ class SwitchSession:
                 self._log(f"\n### RETRY CONNECT ({attempt + 1}/{attempts - 1}): {error}\n")
                 if pause:
                     time.sleep(min(pause * (2 ** attempt), MAX_BACKOFF_SECONDS))
-        assert last is not None  # the loop only breaks after a failed attempt
+        assert last is not None  # nosec B101 - the loop only breaks after a failed attempt
         raise last
 
     def _connect_once(self) -> None:

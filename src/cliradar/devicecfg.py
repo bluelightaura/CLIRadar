@@ -28,7 +28,7 @@ _DEVICE_DEFAULTS: dict[str, object] = {
     "port": 22,
     "username": "",
     "transport": "ssh",
-    "password_env": "SWITCH_PASSWORD",
+    "password_env": "SWITCH_PASSWORD",  # nosec B105 - the variable's name, not a secret
 }
 
 # Conventional ports, so switching transport in the form offers a sane port.
@@ -185,7 +185,7 @@ def probe_reachable(
     start = time.monotonic()
     deadline = start + max(0.1, timeout)
     try:
-        err = sock.connect_ex((host, port))
+        sock.connect_ex((host, port))
     except socket.gaierror:
         sock.close()
         return False, "cannot resolve host"

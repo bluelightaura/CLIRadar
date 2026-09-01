@@ -36,7 +36,9 @@ dev = [
   "build>=1.2,<2",
   "pip-audit>=2.10,<3",
   "pytest>=9.0.3,<10",
-  "ruff>=0.5,<1",
+  # Pinned to one minor: ruff picks its own default rule set, and every
+  # minor widens it - `>=0.5,<1` turned CI red on code that had not changed.
+  "ruff>=0.16,<0.17",
   "setuptools>=69",
   "wheel>=0.45,<1",
 ]
