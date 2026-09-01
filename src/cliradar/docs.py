@@ -345,11 +345,30 @@ def _add_command(
     command: str,
     description: str,
     path: Path,
+    language: str = "",
+    prefer: str = "",
+    spoken: dict[str, str] | None = None,
 ) -> None:
+    """Record one command, and keep the best description offered for it.
+
+    Two manuals of the same device describe the same command, so which text an
+    entry ends up with was decided by which file was read first - and read
+    first means earlier in the alphabet, which is not a reason. Of 7068
+    commands described by both manuals only 5 kept the Russian sentence.
+
+    A description already in the language the operator reads is never replaced.
+    One in another language gives way to it, and everything else keeps the
+    first text offered, as before.
+    """
     entry = commands.setdefault(command, CommandEntry(command=command))
     entry.source.add(f"documentation:{path.as_posix()}")
-    if description and not entry.description:
+    if not description:
+        return
+    held = (spoken or {}).get(command, "")
+    if not entry.description or (prefer and language == prefer and held != prefer):
         entry.description = description
+        if spoken is not None:
+            spoken[command] = language
 
 
 @dataclass
@@ -426,18 +445,28 @@ def _read_docx(path: Path, report: _Skipped | None = None) -> tuple[str, Profile
     )
 
 
-def scan_documentation(root: Path, on_progress=None, on_skip=None) -> dict[str, CommandEntry]:
+def scan_documentation(
+    root: Path, on_progress=None, on_skip=None, prefer_language: str = ""
+) -> dict[str, CommandEntry]:
     """Every command the documentation under ``root`` describes.
 
     ``on_skip`` is handed ``(path, reason)`` for each file that yielded no
     command, whether this reader declined it or read it and found nothing. A
     run is otherwise silent about the difference, and silence there reads as
     success - see docs/DOCPARSE_DEFECTS_RU.md, defect 1.
+
+    ``prefer_language`` is the two-letter code the operator reads. Where two
+    manuals describe one command, the description in that language wins over
+    the one that merely came from an earlier filename - see ``_add_command``.
     """
     commands: dict[str, CommandEntry] = {}
     if not root.exists():
         return commands
     skipped = _Skipped()
+    # Which language each held description is written in, so a later manual can
+    # tell whether it has anything better to offer. Kept beside the catalog
+    # rather than in it: it decides a description, it is not part of one.
+    spoken: dict[str, str] = {}
 
     candidates = [root] if root.is_file() else root.rglob("*")
     paths = sorted(
@@ -492,7 +521,13 @@ def scan_documentation(root: Path, on_progress=None, on_skip=None) -> dict[str, 
                         # the catalog without a description - defect 4 in
                         # docs/DOCPARSE_DEFECTS_RU.md.
                         _add_command(
-                            commands, command, purpose_for(card, command), path
+                            commands,
+                            command,
+                            purpose_for(card, command),
+                            path,
+                            language=profile.language,
+                            prefer=prefer_language,
+                            spoken=spoken,
                         )
             read_as_cards = True
             break

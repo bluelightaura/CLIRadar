@@ -21,6 +21,7 @@ from .exceptions import CLIRadarError, ConfigurationError, DeviceConnectionError
 from .export import render_human_yaml, render_tree_yaml
 from .harvest import harvest_probe_entries
 from .models import Catalog
+from .prefs import load_prefs
 from .report import render_html_report
 
 
@@ -420,6 +421,11 @@ def build_catalog(
             docs_path,
             on_progress=_docs_tick,
             on_skip=lambda path, reason: skipped_documents.append((path, reason)),
+            # Two manuals describe the same command in two languages, and the
+            # one worth keeping is the one the operator reads - the same
+            # preference the menu was started with, not whichever filename
+            # sorted first.
+            prefer_language=str(load_prefs().get("lang", "")),
         )
         if mode in {"compare", "docs"}
         else {}
