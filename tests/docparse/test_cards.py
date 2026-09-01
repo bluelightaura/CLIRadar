@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from cliradar.docparse import is_card_reference, read_card, split_cards
+from cliradar.docparse import (
+    is_card_reference,
+    read_card,
+    repair_welded_tokens,
+    split_cards,
+)
 from cliradar.docparse.cards import Card, says_no_parameters
 from cliradar.docparse.profile import builtin
 
@@ -167,3 +172,50 @@ def test_purpose_keeps_one_line_per_form_of_the_command(excerpt) -> None:
     assert len(card.purpose) == 2
     assert card.purpose[0].startswith("clock timezone Команды")
     assert card.purpose[1].startswith("no clock timezone Эта команда")
+
+
+def _card(command: str, *syntax: str, parameters: dict | None = None) -> Card:
+    return Card(
+        command=command,
+        syntax=list(syntax),
+        parameters=dict(parameters or {}),
+        had_parameter_block=True,
+        had_block=True,
+    )
+
+
+def test_splits_a_weld_the_document_itself_spells_apart() -> None:
+    # "server-group group-name" arrives welded on the card that matters and
+    # apart on plenty of others, so the document is its own dictionary.
+    # Defect 5 in docs/DOCPARSE_DEFECTS_RU.md.
+    welded = _card("aaa accounting", "aaa accounting method name server-groupgroup-name")
+    others = [
+        _card(f"aaa spelled {index}", "aaa method name server-group group-name")
+        for index in range(3)
+    ]
+
+    repair_welded_tokens([welded, *others])
+
+    assert welded.syntax == ["aaa accounting method name server-group group-name"]
+
+
+def test_leaves_a_word_alone_when_its_halves_are_not_written() -> None:
+    # "xgigaethernet" cuts into "xgiga" and "ethernet", and no manual writes
+    # "xgiga". A split invented here is a command the device does not have.
+    card = _card("interface", "interface xgigaethernet interface-number")
+    others = [_card(f"other {i}", "interface ethernet interface-number") for i in range(5)]
+
+    repair_welded_tokens([card, *others])
+
+    assert card.syntax == ["interface xgigaethernet interface-number"]
+
+
+def test_never_splits_a_word_that_heads_a_card() -> None:
+    # "username" is a word this manual uses, not "user" welded to "name" - and
+    # the heading is the one part of a card no column edge touched.
+    named = _card("username fail-count", "username user-name fail-count count")
+    others = [_card(f"other {i}", "user name", "user", "name") for i in range(9)]
+
+    repair_welded_tokens([named, *others])
+
+    assert named.syntax == ["username user-name fail-count count"]

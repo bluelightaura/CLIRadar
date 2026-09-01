@@ -24,7 +24,7 @@ What it costs the project: the standard library, and nothing else.
 from __future__ import annotations
 
 from . import docx
-from .cards import Card, is_card_reference, split_cards
+from .cards import Card, is_card_reference, repair_welded_tokens, split_cards
 from .catalog import (
     Catalog,
     CommandRecord,
@@ -54,5 +54,6 @@ __all__ = [
     "placeholder",
     "purpose_for",
     "read_card",
+    "repair_welded_tokens",
     "split_cards",
 ]

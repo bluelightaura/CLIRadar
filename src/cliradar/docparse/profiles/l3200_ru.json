@@ -15,6 +15,8 @@
     "Command Function"
   ],
   "parameter_header": "^(?P<indent>\\s*)(?:Пара\\w*|Parameter)(?:\\s+(?P<second>\\S+))?",
+  "header_tail": "^\\s*(?:метр|значения|значение)\\s*$",
+  "_header_tail_comment": "Шапка таблицы разорвана узкой колонкой: «Пара|метр», «Допустимые|значения». Хвост встаёт первой строкой тела и уезжает в описание первого параметра - 31 и 22 таблицы соответственно.",
   "no_parameters_word": "^\\s*[—–-]?\\s*(?:нет|отсутствуют|none|no\\s+parameters?)\\b",
   "no_parameters_phrase": "не\\s+(?:имеет|принимает|содержит|требует|использует)\\s+(?:\\w+\\s+)?параметр|без\\s+параметров|(?:takes|has|accepts|requires)\\s+no\\s+parameters",
   "min_cards": 20,

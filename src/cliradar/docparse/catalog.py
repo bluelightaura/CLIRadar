@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass, field
 
-from .cards import Card, is_card_reference, split_cards
+from .cards import Card, is_card_reference, repair_welded_tokens, split_cards
 from .marking import mark_card
 from .profile import Profile, available, default
 
@@ -204,6 +204,7 @@ def build_catalog(
             cards = split_cards(text, chosen)
     else:
         cards = split_cards(text, chosen)
+    repair_welded_tokens(cards)
     return Catalog(
         source=source,
         recognised=is_card_reference(cards, chosen),

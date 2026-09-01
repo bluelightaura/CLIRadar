@@ -151,6 +151,11 @@ class Profile:
     # listing: a manual prints it as bullets or as a paragraph, fenced or not,
     # and either way it is the one sentence the catalog can show an operator.
     purpose_sections: tuple[str, ...] = ()
+    # The tail of a header word the name column was too narrow to hold. A
+    # header reading "Пара|метр" over two lines leaves "метр" standing as the
+    # table's first body line, where it is neither a row nor a description -
+    # and, standing above the first row, it was handed to that row's text.
+    header_tail: re.Pattern[str] | None = None
     # The running header and footer of such a conversion. The footer is not
     # merely noise to drop: it delimits the page, and the page is what puts the
     # document's two layers back into reading order - see docx.reading_order.
@@ -201,6 +206,7 @@ def from_dict(data: dict) -> Profile:
         no_parameters_word=compile_(data["no_parameters_word"]),
         no_parameters_phrase=compile_(data["no_parameters_phrase"]),
         sections=tuple(data.get("sections", ())),
+        header_tail=optional("header_tail"),
         page_header=optional("page_header"),
         page_footer=optional("page_footer"),
         min_cards=int(data.get("min_cards", 20)),

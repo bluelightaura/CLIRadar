@@ -222,3 +222,63 @@ def is_card_reference(cards: list[Card], profile: Profile | None = None) -> bool
     return (
         sum(1 for card in cards if card.structured) / len(cards) >= profile.min_conforming
     )
+
+
+# How much more often a piece must stand on its own than the word it is a
+# piece of. A weld is rare and its halves are common, so three times over is
+# already a wide margin; the cost of getting it wrong is a command the device
+# does not have, which is the expensive direction.
+WELD_MARGIN = 3
+# The shortest piece worth believing in. Two characters spell too many
+# accidents - "tftp" cuts into "t" and "ftp", both of which a manual writes.
+MIN_WELD_PIECE = 3
+
+
+def repair_welded_tokens(cards: list[Card]) -> None:
+    """Split syntax tokens the conversion welded, judged against the document.
+
+    A paged conversion loses the gutter between two words and prints them as
+    one: the Centec reference writes "server-group group-name" as
+    "server-groupgroup-name", and that reaches the catalog as a command nobody
+    can type. The same manual writes both halves apart hundreds of times.
+
+    So the document is its own dictionary. A token is split only where both
+    halves stand alone in it far more often than the welded form does, which
+    is what tells "server-groupgroup-name" from "xgigaethernet" - "xgiga" is
+    written nowhere. A word that heads a card is never split whatever the
+    counts say: the heading is the one part of a card no column edge touched,
+    so "username" is a word this manual uses, not "user" welded to "name".
+
+    Errors go in the safe direction. A weld left alone leaves the reader where
+    it already was; a split invented puts a command in the catalog that the
+    device will rightly deny having.
+    """
+    counts: dict[str, int] = {}
+    headings: set[str] = set()
+    for card in cards:
+        headings.update(TOKEN_RE.findall(card.command))
+        for line in card.syntax:
+            for token in TOKEN_RE.findall(line):
+                counts[token] = counts.get(token, 0) + 1
+        for name in card.parameters:
+            counts[name] = counts.get(name, 0) + 1
+
+    repairs: dict[str, str] = {}
+    for token, seen in counts.items():
+        if token in headings or "." in token or "/" in token:
+            continue
+        for cut in range(MIN_WELD_PIECE, len(token) - MIN_WELD_PIECE + 1):
+            head, tail = token[:cut], token[cut:]
+            if (
+                counts.get(head, 0) >= WELD_MARGIN * seen
+                and counts.get(tail, 0) >= WELD_MARGIN * seen
+            ):
+                repairs[token] = f"{head} {tail}"
+                break
+    if not repairs:
+        return
+    for card in cards:
+        card.syntax[:] = [
+            " ".join(repairs.get(word, word) for word in line.split())
+            for line in card.syntax
+        ]

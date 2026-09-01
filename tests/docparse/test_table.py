@@ -211,3 +211,17 @@ def test_two_spellings_of_one_length_fold_the_same_way_every_run() -> None:
     syntax = ["show mac-address", "show mac-address MAC-ADDRESS"]
 
     assert _vocabulary(syntax).folded["mac-address"] == "MAC-ADDRESS"
+
+
+def test_drops_the_tail_of_a_header_word_the_column_broke(excerpt) -> None:
+    # The header reads "ПараПримечание" over "метр": the name column was too
+    # narrow for "Параметр". The orphaned "метр" stood as the table's first
+    # body line, above the first row, and was handed to that row's text - 53
+    # of this manual's tables opened a description with "метр" or "значения".
+    # Defect 4 in docs/DOCPARSE_DEFECTS_RU.md.
+    card = split_cards(excerpt("purpose_per_form"), builtin("l3200_ru"))[0]
+
+    assert card.command == "clock timezone"
+    first = next(iter(card.parameters.values()))
+    assert not first.startswith("метр")
+    assert not any(text.startswith("метр ") for text in card.parameters.values())

@@ -270,6 +270,15 @@ def _table_body(
         second = header.group("second")
         edge = line.index(second, indent) if second else None
         body = [rest for rest in lines[position + 1 :] if rest.strip()]
+        # The header itself can be broken by the column that holds it - "Пара"
+        # over "метр" - and the orphaned tail then stands as the first line of
+        # the body, where it is neither a row nor a description. Standing above
+        # the first row it was handed to that row's text, which is how 53 of
+        # this manual's tables opened a description with "метр" or "значения".
+        tail = (profile or default()).header_tail
+        if tail is not None:
+            while body and tail.match(body[0]):
+                body = body[1:]
         return body, indent, edge
     return None, 0, None
 

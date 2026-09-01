@@ -6,7 +6,14 @@ import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .docparse import docx, is_card_reference, mark_parameters, purpose_for, split_cards
+from .docparse import (
+    docx,
+    is_card_reference,
+    mark_parameters,
+    purpose_for,
+    repair_welded_tokens,
+    split_cards,
+)
 from .docparse.profile import Profile, available
 from .models import CommandEntry
 
@@ -472,6 +479,11 @@ def scan_documentation(root: Path, on_progress=None, on_skip=None) -> dict[str, 
             cards = split_cards(text, profile)
             if not is_card_reference(cards, profile):
                 continue
+            # The conversion welds two words into one often enough to matter,
+            # and only the document as a whole can say which - see
+            # repair_welded_tokens. Done before marking so the table rows the
+            # weld hid are found.
+            repair_welded_tokens(cards)
             for card in cards:
                 for syntax in mark_parameters(card, profile):
                     for command in _expand_syntax(syntax):
