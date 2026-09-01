@@ -305,3 +305,48 @@ def test_skip_callback_is_optional(tmp_path: Path) -> None:
     (tmp_path / "manual.docx").write_bytes(b"not a zip at all")
     # No callback must not raise.
     assert scan_documentation(tmp_path) == {}
+
+
+def test_prefers_a_description_in_the_language_the_operator_reads() -> None:
+    # Two manuals of one device describe the same command, and which text the
+    # entry kept was decided by which filename sorted first. Of 7068 commands
+    # described by both real manuals, only 5 kept the Russian sentence.
+    from cliradar.docs import _add_command
+    from cliradar.models import CommandEntry
+
+    commands: dict[str, CommandEntry] = {}
+    spoken: dict[str, str] = {}
+    english, russian = Path("a-english.md"), Path("z-russian.md")
+
+    _add_command(commands, "clock timezone", "Sets the zone", english, "en", "ru", spoken)
+    _add_command(commands, "clock timezone", "Задаёт часовой пояс", russian, "ru", "ru", spoken)
+
+    assert commands["clock timezone"].description == "Задаёт часовой пояс"
+    # Both manuals are still credited with describing it.
+    assert len(commands["clock timezone"].source) == 2
+
+
+def test_does_not_replace_a_description_already_in_that_language() -> None:
+    from cliradar.docs import _add_command
+    from cliradar.models import CommandEntry
+
+    commands: dict[str, CommandEntry] = {}
+    spoken: dict[str, str] = {}
+
+    _add_command(commands, "cls", "Первое", Path("a.md"), "ru", "ru", spoken)
+    _add_command(commands, "cls", "Второе", Path("b.md"), "ru", "ru", spoken)
+
+    assert commands["cls"].description == "Первое"
+
+
+def test_without_a_preference_the_first_description_still_wins() -> None:
+    from cliradar.docs import _add_command
+    from cliradar.models import CommandEntry
+
+    commands: dict[str, CommandEntry] = {}
+    spoken: dict[str, str] = {}
+
+    _add_command(commands, "cls", "First", Path("a.md"), "en", "", spoken)
+    _add_command(commands, "cls", "Второе", Path("b.md"), "ru", "", spoken)
+
+    assert commands["cls"].description == "First"

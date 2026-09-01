@@ -147,6 +147,10 @@ class Profile:
     # the only way to tell it from content is to have been told the list. A
     # manual that arrives already marked up leaves this empty.
     sections: tuple[str, ...] = ()
+    # Which language this manual is written in, as a two-letter code. Two
+    # manuals describing the same command both offer a description, and which
+    # one an operator wants is the one they can read - see docs.scan_documentation.
+    language: str = ""
     # The block that says what the command is for. Read as prose, not as a
     # listing: a manual prints it as bullets or as a paragraph, fenced or not,
     # and either way it is the one sentence the catalog can show an operator.
@@ -205,6 +209,7 @@ def from_dict(data: dict) -> Profile:
         parameter_header=re.compile(data["parameter_header"]),
         no_parameters_word=compile_(data["no_parameters_word"]),
         no_parameters_phrase=compile_(data["no_parameters_phrase"]),
+        language=str(data.get("language", "")),
         sections=tuple(data.get("sections", ())),
         header_tail=optional("header_tail"),
         page_header=optional("page_header"),
