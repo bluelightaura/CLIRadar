@@ -1,0 +1,62 @@
+{
+  "name": "centec_eng",
+  "_comment": "Centec Command Reference (ENG). Номер раздела ровно из трёх чисел: все 1771 настоящих заголовка такие, а из четырёх и больше - только IP-адреса из примеров вывода (255.255.255.255 telnet), которые иначе открывают пустую карточку. Карточка озаглавлена номером раздела ('2.1.1 auth-degenerate'), блок синтаксиса называется Command Format (на части карточек - Command Form), таблица параметров озаглавлена 'Parameter Description Values'. Документ существует только как .docx, полученный из PDF, и читается через docparse.docx: имена блоков и колонтитулы нужны там, чтобы отличить заголовок блока от содержимого и нарезать страницы.",
+  "heading": "^\\d+\\.\\d+\\.\\d+\\s+(?P<command>[a-z][^\\n]*?)\\s*$",
+  "syntax_sections": [
+    "Command Format",
+    "Command Formats",
+    "Command Form",
+    "命令形式"
+  ],
+  "parameter_sections": [
+    "Parameter Description",
+    "Parameter Descriptions",
+    "参数说明"
+  ],
+  "purpose_sections": [
+    "Command Function",
+    "Command Functionality",
+    "命令功能"
+  ],
+  "parameter_header": "^(?P<indent>\\s*)(?:Parameter|参数)(?:\\s+(?P<second>\\S+))?",
+  "no_parameters_word": "^\\s*[—–-]?\\s*(?:none|no\\s+parameters?|无)\\b",
+  "no_parameters_phrase": "(?:takes|has|accepts|requires)\\s+no\\s+parameters|no\\s+parameters?\\s+(?:are\\s+)?(?:required|needed)",
+  "sections": [
+    "Command Function",
+    "Command Functionality",
+    "Command Format",
+    "Command Formats",
+    "Command Form",
+    "Parameter Description",
+    "Parameter Descriptions",
+    "Default Value",
+    "Command View",
+    "Command Guidance",
+    "Usage Example",
+    "Usage Examples",
+    "命令功能",
+    "命令形式",
+    "参数说明",
+    "缺省值",
+    "命令视图",
+    "命令指导",
+    "使用实例"
+  ],
+  "page_header": "^Chapter\\s+\\d+\\s+\\S|^(?:Table of|Contents|Preface)$",
+  "page_footer": "^Switch Command Line Manual\\s+\\S+$",
+  "min_cards": 20,
+  "min_conforming": 0.9,
+  "_lexicon_comment": "Слова, которыми ЭТОТ мануал объясняет параметр. Собраны разбором 359 строк, на которых лестница улик не находила ничего и догадывалась. Домен здесь чаще назван формой записи (dotted decimal, hexadecimal, 128-bit) и длиной (255 characters), чем диапазоном: диапазон мануал пишет тильдой, дефисом не пишет - так его было бы не отличить от имени с дефисом.",
+  "lexicon": {
+    "domain": "dotted\\s+decimal|ip(?:v4|v6)?\\s+address|mac\\s+address|\\bAA:BB:CC|\\bH-H-H\\b|\\b128-bit\\b|a\\.b\\.c\\.d|x:x::x:x|hexadecimal|\\bdecimal\\b|\\binteger\\b|\\bstring\\b|\\brange\\b|\\d+\\s*~\\s*\\d+|<\\d+-\\d+>|\\blength\\b|\\bcharacters?\\b|\\bbytes?\\b|\\bdigits?\\b|not\\s+exceed|\\bid\\b|\\bnumber\\b|\\bname\\b|\\bpath\\b",
+    "address": "dotted\\s+decimal|ip(?:v4|v6)?\\s+address|mac\\s+address|\\bAA:BB:CC|\\bH-H-H\\b|\\b128-bit\\b|a\\.b\\.c\\.d|x:x::x:x|link-local|router\\s+id",
+    "effect": "^\\s*(?:\\[[^\\]]*\\]\\s*)?(?:optional\\s+parameter[,\\s]*)?(?:enables?|disables?|allows?|denies|deletes?|clears?|resets?|restores?|configures?|sets?|displays?|shows?|supports?|means?|turns?|selects?|applies|activates?|binds?|forces?|starts?|stops?|indicat\\w*)\\b",
+    "ranges": [
+      "(\\d+(?:\\s\\d{3})*)\\s*~\\s*(\\d+(?:\\s\\d{3})*)",
+      "<(\\d+)-(\\d+)>",
+      "range\\s+(?:is\\s+|of\\s+|from\\s+)?(\\d+)\\s*(?:to|-|–)\\s*(\\d+)"
+    ]
+  },
+  "_sections_comment": "Хвост списка - китайские имена тех же блоков. Мануал переведён не до конца: на семи карточках заголовки остались непереведёнными, синтаксис при этом напечатан как обычно. Имя блока - данные профиля, поэтому починка здесь, а не в коде.",
+  "_parameter_header_comment": "Шапка таблицы узнаётся по одному первому слову. На непереведённых карточках она называется 参数 - те же колонки, другое написание."
+}

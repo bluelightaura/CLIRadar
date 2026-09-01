@@ -227,3 +227,81 @@ value Интервал отчёта
         "ddm report interval value",
         "no ddm report interval",
     }
+
+
+def test_a_docx_manual_is_read_as_cards(tmp_path: Path, monkeypatch) -> None:
+    """Three real pages of the Centec reference, read end to end by the scan.
+
+    The excerpt carries three cards and a profile asks for twenty, so the
+    threshold is lowered rather than the fixture inflated: what is under test
+    is the wiring - that a .docx is opened at all, that the profile chosen to
+    read it is the one used to split it, and that the commands come out - not
+    the threshold, which has its own test.
+    """
+    import dataclasses
+
+    from cliradar import docs
+    from cliradar.docparse.profile import builtin
+
+    excerpt = Path(__file__).parent / "docparse" / "fixtures" / "centec_pages.docx"
+    small = dataclasses.replace(builtin("centec_eng"), min_cards=3)
+    monkeypatch.setattr(docs, "available", lambda: [small])
+
+    commands = scan_documentation(excerpt)
+
+    assert "configure" in commands
+    assert "debug cli cmd" in commands  # expanded out of { cmd | pty | ... }
+    # The eight printed lines of one form are one command, so its choices
+    # expand into the views it actually offers - and the domain the table
+    # states for level-value is the placeholder the device's help prints.
+    assert "command-privilege level <0-15> view bgp-af-ipv4-mcast" in commands
+    # The line broke inside that name, and the hyphen it broke on belongs to
+    # the name. Closed up without it, the command would be a phantom.
+    assert not any("bgp-af-ipv4mcast" in name for name in commands)
+    # Nor did any continuation line become a command of its own.
+    assert not any(name.startswith("mcast |") for name in commands)
+
+
+def test_a_docx_no_profile_earns_yields_nothing(tmp_path: Path) -> None:
+    # The same excerpt at the real threshold: three cards is not a manual, and
+    # there is no line reader to fall back to when the file is a zip.
+    excerpt = Path(__file__).parent / "docparse" / "fixtures" / "centec_pages.docx"
+
+    assert scan_documentation(excerpt) == {}
+
+
+def test_a_file_that_is_not_really_a_docx_is_skipped(tmp_path: Path) -> None:
+    (tmp_path / "broken.docx").write_bytes(b"not a zip at all")
+
+    assert scan_documentation(tmp_path) == {}
+
+
+def test_reports_a_manual_that_yielded_nothing(tmp_path: Path) -> None:
+    # A .docx no profile can read is otherwise indistinguishable from one that
+    # was read: the run prints a command count either way. See defect 1 in
+    # docs/DOCPARSE_DEFECTS_RU.md.
+    (tmp_path / "readable.md").write_text("```\nshow version\n```\n", encoding="utf-8")
+    (tmp_path / "manual.docx").write_bytes(b"not a zip at all")
+    skipped: list[tuple[Path, str]] = []
+
+    commands = scan_documentation(tmp_path, on_skip=lambda p, why: skipped.append((p, why)))
+
+    assert set(commands) == {"show version"}
+    assert [p.name for p, _ in skipped] == ["manual.docx"]
+    assert "архив" in skipped[0][1]
+
+
+def test_reports_a_file_read_without_finding_a_command(tmp_path: Path) -> None:
+    (tmp_path / "prose.md").write_text("Просто абзац текста без команд.\n", encoding="utf-8")
+    skipped: list[tuple[Path, str]] = []
+
+    scan_documentation(tmp_path, on_skip=lambda p, why: skipped.append((p, why)))
+
+    assert [p.name for p, _ in skipped] == ["prose.md"]
+    assert "не дал ни одной команды" in skipped[0][1]
+
+
+def test_skip_callback_is_optional(tmp_path: Path) -> None:
+    (tmp_path / "manual.docx").write_bytes(b"not a zip at all")
+    # No callback must not raise.
+    assert scan_documentation(tmp_path) == {}

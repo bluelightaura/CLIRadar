@@ -7,7 +7,7 @@ import stat
 import sys
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from enum import IntEnum
 from pathlib import Path
 
@@ -278,6 +278,28 @@ class ScanOutcome:
     # Per-block markdown reports written beside the catalog, and where they are.
     block_reports: int = 0
     blocks_path: Path | None = None
+    # How much the link fought back: transports rebuilt mid-scan and connect
+    # attempts spent getting on. Zeros on a healthy run.
+    resilience: dict[str, int] = field(default_factory=dict)
+    # Manuals the documentation reader passed over, and why. A run that read
+    # one of two manuals prints the same command count as one that read both,
+    # so the difference has to be carried out and said.
+    skipped_documents: list[tuple[Path, str]] = field(default_factory=list)
+
+
+def _session_resilience(session: object) -> dict[str, int]:
+    """What the link cost this run, in the session's own counters.
+
+    A context that came back incomplete reads very differently when the
+    transport was rebuilt twice underneath it: without these numbers a flapping
+    link is indistinguishable from a device that simply has less to show. Read
+    with ``getattr`` defaults so a transport that never learned to reconnect
+    still reports zeros instead of taking the run's summary down.
+    """
+    return {
+        "reconnects": int(getattr(session, "reconnects", 0)),
+        "connect_retries_used": int(getattr(session, "connect_retries_used", 0)),
+    }
 
 
 def _compare_verify_seeds(
@@ -388,8 +410,17 @@ def build_catalog(
                 )
             )
 
+    # A manual this reader declines contributes nothing and says nothing, so a
+    # folder of two manuals where only one was read prints the same success
+    # line as one where both were. Collected here and reported by the caller.
+    skipped_documents: list[tuple[Path, str]] = []
+
     documented = (
-        scan_documentation(docs_path, on_progress=_docs_tick)
+        scan_documentation(
+            docs_path,
+            on_progress=_docs_tick,
+            on_skip=lambda path, reason: skipped_documents.append((path, reason)),
+        )
         if mode in {"compare", "docs"}
         else {}
     )
@@ -411,7 +442,14 @@ def build_catalog(
         }
         write_catalog(catalog, destination)
         write_exports(catalog, config)
-        return ScanOutcome(destination, None, len(catalog.commands), 0, True)
+        return ScanOutcome(
+            destination,
+            None,
+            len(catalog.commands),
+            0,
+            True,
+            skipped_documents=skipped_documents,
+        )
 
     import paramiko
 
@@ -467,6 +505,7 @@ def build_catalog(
         return run_deadline is not None and time.monotonic() >= run_deadline
 
     mode_report = None
+    resilience: dict[str, int] = {"reconnects": 0, "connect_retries_used": 0}
     config_command, config_output = "", ""
     try:
         with session_factory(config.device.to_session_dict(), config.output.raw_log) as session:
@@ -610,6 +649,9 @@ def build_catalog(
                     extra_query_helps=extra_query_helps,
                     verify_seeds=verify_seeds,
                 )
+            # Taken inside the block: once the session closes the caller has no
+            # way back to how the link behaved while the scan was running.
+            resilience = _session_resilience(session)
     except (OSError, TimeoutError, RuntimeError, ValueError, paramiko.SSHException) as error:
         raise DeviceConnectionError(f"device session failed: {error}") from error
 
@@ -646,6 +688,7 @@ def build_catalog(
             "queries": queries,
             "source": "context-graph",
             "config_unexplained": config_unexplained,
+            "resilience": resilience,
             **mode_report.to_dict(),
         }
         write_catalog(catalog, destination)
@@ -681,10 +724,13 @@ def build_catalog(
             config_summary=catalog.configuration or None,
             block_reports=len(block_reports),
             blocks_path=block_reports[0].parent if block_reports else None,
+            resilience=resilience,
+            skipped_documents=skipped_documents,
         )
 
     catalog.scan = crawl_result.to_dict()
     catalog.scan["config_unexplained"] = config_unexplained
+    catalog.scan["resilience"] = resilience
     if mode == "compare":
         catalog.scan["compare_verify_skipped"] = verify_skipped
     # The device's running configuration overrides an optimistic crawl: a line
@@ -706,6 +752,8 @@ def build_catalog(
         config_path=written_config,
         config_summary=catalog.configuration or None,
         verify_skipped=verify_skipped,
+        resilience=resilience,
+        skipped_documents=skipped_documents,
     )
 
 
@@ -992,6 +1040,13 @@ def _execute(args: argparse.Namespace, cancellable: bool = False) -> int:
             "отменено — записан частичный каталог (scan incomplete)",
             file=sys.stderr,
         )
+    # Said before the counts, and on stderr, because it changes what the counts
+    # mean: a manual that gave nothing is not visible in a number of commands.
+    for skipped_path, reason in outcome.skipped_documents:
+        print(
+            f"внимание: {skipped_path} не дал ни одной команды - {reason}",
+            file=sys.stderr,
+        )
     if not args.quiet:
         if args.mode == "docs":
             print(f"Wrote {outcome.commands} documentation commands to {outcome.catalog_path}")
@@ -1008,6 +1063,15 @@ def _execute(args: argparse.Namespace, cancellable: bool = False) -> int:
             )
         print(f"Wrote command tree to {config.output.tree_catalog}")
         print(f"Wrote human-readable commands to {config.output.human_catalog}")
+        reconnects = outcome.resilience.get("reconnects", 0)
+        retries = outcome.resilience.get("connect_retries_used", 0)
+        if reconnects or retries:
+            print(
+                f"note: the link was not steady - {reconnects} reconnect(s),"
+                f" {retries} connect retry(ies); contexts reported incomplete"
+                " may be the link rather than the device",
+                file=sys.stderr,
+            )
         if outcome.verify_skipped:
             print(
                 f"note: {outcome.verify_skipped} documented commands were not"
