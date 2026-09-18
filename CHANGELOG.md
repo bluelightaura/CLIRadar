@@ -31,6 +31,13 @@ Semantic Versioning.
   `error-down` or lists options without descriptions can be read correctly
   without editing code. Both stay off by default - each trades a class of
   missed commands for a class of invented ones.
+- A manual is read by a package of its own (`cliradar.docparse`): a document is
+  split into cards, each card's syntax block and parameter table are read back
+  into each other, and what differs between manuals is data rather than code -
+  a JSON profile names one document's headings, column titles and vocabulary,
+  and two ship with the package (a Russian L3200 reference and an English
+  Centec one). A `.docx` is streamed rather than held in memory, because the
+  manual this was written for is 5 MB packed and 113 MB open.
 
 ### Changed
 
@@ -47,6 +54,24 @@ Semantic Versioning.
   a live port. Candidates left untried for want of a sample are counted in
   `probes_unsampled` with the parameters that would unlock them, so the cost is
   reported rather than paid silently. Set the flag only against a lab device.
+- Documentation commands come from the document's own shape instead of from
+  matching the words the operator typed. The old reader found a command when a
+  manual happened to phrase it the way the operator did and missed it
+  otherwise; the new one follows headings, syntax blocks and parameter tables,
+  and a name that arrives broken - split across lines, welded to its heading,
+  bulleted with U+2219, or joined to its neighbour where a paged conversion
+  lost the gutter - is repaired from evidence in the same document rather than
+  by guesswork. A weld is undone only where both halves stand alone in the
+  document three times as often as the weld itself, because an invented split
+  puts a command in the catalog the device will deny having while a weld left
+  alone changes nothing. The reference manual yields 14588 commands, every one
+  of them carrying a description.
+- A command described by two manuals of the same device keeps the description
+  in the language the operator reads. The first non-empty text won, and first
+  meant earliest filename, so commands described in both manuals shipped the
+  Russian sentence to an English reader purely because "Centec" sorts before
+  "L3200". A profile now states its manual's language and the launcher's own
+  setting decides, with nothing new to configure.
 
 ### Fixed
 
@@ -67,6 +92,35 @@ Semantic Versioning.
   not just `(y/n)`. VRP also asks `[Y/N]`, `(y or n)`, `[yes,no] (no)` and a
   bare `Continue?`; a form the pattern missed left the device reading a yes/no
   while the scan typed its next command into the open dialog.
+- A manual the reader declined is now named instead of silently counted as
+  read. Every way the reading returns nothing says why, files that yielded no
+  command are listed, and the formats this reader cannot open at all (`.pdf`,
+  `.doc`, `.odt` and their kin) are refused by name rather than dropped before
+  the loop ever starts - a folder holding four PDFs beside one manual used to
+  draw not a word about them, and a command count printed either way is what
+  made a refusal look like a success. A document over the size limit is refused
+  with its size spelled out.
+- Markdown that is not a command reference no longer contributes commands. The
+  line reader took `pytest` and `pip-audit` out of a README, an arrow diagram
+  out of an architecture note, and a ping line out of a rescue procedure -
+  each of which `compare` then reported as a command the device was missing.
+  Three rules, each resting on what the document says about itself: a fence
+  declaring a language other than the device's own is skipped whole, a line
+  carrying an arrow is showing a result rather than a command, and a markdown
+  table is read as commands only when its header says it holds them. The real
+  manuals do not move by a single command.
+- A parameter table no longer damages the descriptions it hands over. A header
+  the name column could not hold broke in two and its orphaned tail opened the
+  first description on 53 tables; a row repeating the name it is filed under
+  made 99.9% of an honest manual's rows look like the corruption a damaged
+  manual really has; and the name was taken off in two places at once, which
+  ate a word of the description as soon as both passes landed.
+- Marking answers one question one way. Brackets holding a single token offer
+  nothing to choose between and are read as optional rather than as a choice;
+  and a card headed `no mac-address` no longer has the `no` of its own name
+  skipped as though it negated some other command, which slid the comparison
+  one token along and shipped 55 of that manual's 89 negated forms as
+  `no <mac-address>`.
 
 ### Added (earlier in this cycle)
 
