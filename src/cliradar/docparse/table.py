@@ -204,11 +204,61 @@ def parameter_rows(
     bounds = [index for index, _ in starts] + [len(body)]
     preamble = " ".join(body[: bounds[0]]).split()
     for position, (index, name) in enumerate(starts):
-        text = " ".join(body[index : bounds[position + 1]]).split()
-        if position == 0:
-            text = preamble + text
-        rows[name] = " ".join(text)
+        # The name comes off before the preamble goes on: the values column
+        # sometimes sets its first line above the name it belongs to, and with
+        # that text in front the row no longer opens with its own name.
+        text = _without_leading_name(name, " ".join(body[index : bounds[position + 1]])).split()
+        rows[name] = " ".join(preamble + text if position == 0 else text)
     return rows
+
+
+def _without_leading_name(name: str, text: str) -> str:
+    """The row's description with the row's own name taken off its head.
+
+    A row opens with the word it describes - "offset Укажите разницу во времени
+    от UTC" - and that word is already the key this text is filed under. Left
+    in place it is not merely redundant: it is what the corruption measure
+    counted, on the PDF-derived manual, as 99.9% of rows "beginning with the
+    parameter name". That is the shape of every honest row in that source and
+    also the shape of a genuinely wrecked row in the hand-made one, so while it
+    stands the measure cannot tell the two apart.
+
+    This is the only place the name is taken off. The marking layer used to do
+    it again on its way past, and once a row stopped arriving with its name
+    still attached the second pass began eating real words: the Centec row
+    "password Password in string form" lost the name here and the noun there,
+    and was weighed as "in string form".
+
+    Four details are each paid for. The head may be wrapped in the bracket the
+    syntax puts round a choice, so "{cipher | plain} Password in ciphertext"
+    yields its name. A leading hyphen is allowed because a ping flag prints
+    "-t" where its syntax spells "t" - six rows across both manuals. The name
+    must end where the word does, or the pattern eats its own token out of a
+    longer one: "disables the IS-IS graceful restart feature" lost "disable"
+    from inside "disables" and shipped a plainly literal choice as <disable>.
+    The lookahead names one alphabet rather than "any word character", because
+    a Cyrillic letter cannot be continuing a Latin name - there
+    "simple-passwordВключение простой" is the column edge welded shut, and the
+    name does have to come off.
+
+    And the name is taken twice only when the second time leaves nothing.
+    Centec spends both columns of a row on the same word - "arp ARP-", "index
+    index -" - and there the repeat is not prose but silence; taking it off is
+    what tells the ladder the row describes nothing. Where something does
+    follow, the repeat is a real word and stays: "password Password in string
+    form" describes a password.
+    """
+    if not name:
+        return text
+    head = rf"[\s({{-]*{re.escape(name)}(?![A-Za-z0-9_])[\s)}}:.,—–-]*"
+    stripped = re.sub(f"^{head}", "", text, count=1, flags=re.IGNORECASE).strip()
+    if re.fullmatch(head, stripped, flags=re.IGNORECASE):
+        # Nothing survived but the name a second time: "arp ARP-", "index
+        # index -". A row that spends both its columns on its own name says
+        # nothing, and saying so is what marks the token a literal keyword
+        # rather than a value the reader had to guess at.
+        return ""
+    return stripped
 
 
 PLAIN_NAME_RE = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")

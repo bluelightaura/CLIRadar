@@ -20,7 +20,6 @@ measuring to get right.
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 
 from .cards import Card
@@ -207,20 +206,6 @@ def _command_prefix(command: str, line: str, matches: list) -> int:
     return start + matched if matched else 0
 
 
-def _without_own_name(token: str, description: str) -> str:
-    """The row's text with the leading repeat of its own name taken off.
-
-    The name column bleeds into the description on nearly every card of this
-    manual - the row for "drop" reads "drop Отбрасывание пакета" - and both
-    tests below are anchored at the start of the text. Anchoring them behind
-    the row's own name is what lets a description be recognised at all.
-    """
-    stripped = re.sub(
-        rf"^[\s({{]*{re.escape(token)}[\s)}}:.,—–-]*", "", description, count=1, flags=re.IGNORECASE
-    )
-    return stripped.strip()
-
-
 def _decide(
     token: str,
     description: str | None,
@@ -234,7 +219,10 @@ def _decide(
 ) -> Mark:
     """Weigh one token against the card's table. See ``mark_parameters``."""
     if description is not None:
-        description = _without_own_name(token, description)
+        # The name is taken off where the row is built, in table.py; doing it
+        # again here ate a word of the description that only looked like a
+        # repeat. All that is left to ask is whether anything survived.
+        description = description.strip()
         if not description:
             # The table named the row and said nothing else - "(preference)",
             # "(single-connection)". A row that describes nothing is evidence
