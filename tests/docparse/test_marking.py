@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from cliradar.docparse import mark_card, mark_parameters, placeholder, split_cards
+from cliradar.docparse.cards import Card
 from cliradar.docparse.profile import builtin
 
 
@@ -132,3 +133,37 @@ def test_a_lone_token_in_brackets_is_optional_not_a_choice(excerpt) -> None:
     assert port, "the card must print port-id"
     assert {mark.kind for mark in port} == {"value"}
     assert {mark.text for mark in port} == {"<1-65535>"}
+
+
+def test_a_row_that_describes_an_effect_settles_a_literal_choice() -> None:
+    # Copied from the Centec manual, whose IS-IS card prints its forms without
+    # braces, so the choice is settled by the row's text and not by the syntax.
+    # The row arrives with its own name already taken off in table.py; what is
+    # left has to be read as an effect, or a plainly literal choice ships as
+    # the placeholder <disable>.
+    card = Card(
+        command="graceful-restart {enable|disable}",
+        syntax=["graceful-restart enable", "graceful-restart disable"],
+        parameters={
+            "enable": "enables the IS-IS graceful restart feature -",
+            "disable": "disables the IS-IS graceful restart feature -",
+        },
+    )
+
+    assert mark_parameters(card, builtin("centec_eng")) == [
+        "graceful-restart enable",
+        "graceful-restart disable",
+    ]
+
+
+def test_a_row_that_says_nothing_leaves_its_token_alone() -> None:
+    # table.py hands over an empty description when a row spent both its
+    # columns on its own name ("arp ARP-"). Evidence of nothing is not evidence
+    # of a value: the token stays as the manual prints it.
+    card = Card(
+        command="show hwroute hardware",
+        syntax=["show hwroute hardware arp"],
+        parameters={"arp": ""},
+    )
+
+    assert mark_parameters(card, builtin("centec_eng")) == ["show hwroute hardware arp"]

@@ -77,12 +77,11 @@ def test_rows_are_anchored_on_the_syntax_and_not_on_whitespace() -> None:
     # A single space between the name and its description, because the name
     # fills its column. Splitting on a run of two spaces made the whole line
     # into a parameter no device has.
-    # The row keeps its whole line, name included - what matters is that the
-    # key is the parameter and not the sentence that followed it.
+    # The row keeps its whole line bar the name, which is already the key it
+    # is filed under - what matters is that the key is the parameter and not
+    # the sentence that followed it.
     assert parameter_rows(lines, ["privilege privilege-value"]) == {
-        "privilege-value": (
-            "privilege-value Уровень разрешений пользователя Целое число от 0 до 15"
-        )
+        "privilege-value": "Уровень разрешений пользователя Целое число от 0 до 15"
     }
 
     # The same table read without the syntax to lean on: no anchor, no rows.
@@ -98,7 +97,7 @@ def test_shape_is_consulted_only_when_the_syntax_vouches_for_nothing() -> None:
     # the syntax cannot vouch for "module-name" - and without a last resort the
     # whole table is lost.
     assert parameter_rows(lines, ["show logging source { aaa | acl }"]) == {
-        "module-name": "module-name Имя модуля системного ПО См. список выше"
+        "module-name": "Имя модуля системного ПО См. список выше"
     }
 
 
@@ -225,3 +224,92 @@ def test_drops_the_tail_of_a_header_word_the_column_broke(excerpt) -> None:
     first = next(iter(card.parameters.values()))
     assert not first.startswith("метр")
     assert not any(text.startswith("метр ") for text in card.parameters.values())
+
+
+def test_the_row_does_not_repeat_the_name_it_is_filed_under() -> None:
+    lines = [
+        "Параметр   Описание                            Значение",
+        "offset     Укажите разницу во времени от UTC   В формате HH:MM",
+    ]
+    # The name opening the row is the key the text is filed under, and leaving
+    # it in the text is what made 99.9% of the PDF-derived manual's rows look
+    # like the corruption the hand-made one really has.
+    assert parameter_rows(lines, ["clock timezone time-zone-name add offset"]) == {
+        "offset": "Укажите разницу во времени от UTC В формате HH:MM"
+    }
+
+
+def test_a_flag_row_answers_to_the_name_its_syntax_spells() -> None:
+    lines = [
+        "Параметр   Описание",
+        "-t         Повторная передача пакетов ICMP ECHO",
+    ]
+    # The syntax prints "-t" and the reader keeps "t"; the row prints the dash.
+    # Comparing without hyphens is what lets the row shed its own name here -
+    # the only place in either manual where the spellings differ at all.
+    assert parameter_rows(lines, ["ping mac-address -t"]) == {
+        "t": "Повторная передача пакетов ICMP ECHO"
+    }
+
+
+def test_the_name_is_taken_only_off_the_head() -> None:
+    lines = [
+        "Параметр    Описание",
+        "acl-number  Номер списка; acl-number совпадает с номером выше",
+    ]
+    # A description that goes on to mention the parameter keeps that mention:
+    # only the word standing where the row opens is the redundant one.
+    assert parameter_rows(lines, ["ip access-group acl-number"]) == {
+        "acl-number": "Номер списка; acl-number совпадает с номером выше"
+    }
+
+
+def test_the_name_is_not_eaten_out_of_a_longer_word() -> None:
+    # Taking the name off used to carry no word boundary, so "disable" came out
+    # of the head of "disables" and the row was left as "s the IS-IS graceful
+    # restart feature" - text describing no effect and no domain, which shipped
+    # a plainly literal choice as the placeholder <disable>.
+    lines = [
+        "Parameter Description Values",
+        "disable disables the IS-IS graceful restart feature -",
+    ]
+
+    assert parameter_rows(lines, ["graceful-restart disable"]) == {
+        "disable": "disables the IS-IS graceful restart feature -"
+    }
+
+
+def test_a_name_welded_to_its_description_still_comes_off() -> None:
+    # The other side of that boundary, from the hand-made Russian manual: the
+    # column edge closed on "simple-password" and the description follows with
+    # no space at all. A boundary that refused every letter would leave the
+    # whole weld standing and the row would describe nothing. A Cyrillic letter
+    # cannot be continuing a Latin name, so it is read as the weld it is.
+    lines = [
+        "Параметр   Описание",
+        "simple-passwordВключение простой (текстовой) аутентификации",
+    ]
+
+    assert parameter_rows(lines, ["ip ospf authentication simple-password <1-8>"]) == {
+        "simple-password": "Включение простой (текстовой) аутентификации"
+    }
+
+
+def test_a_row_spending_both_columns_on_its_name_says_nothing() -> None:
+    # Centec writes "arp ARP-" and "index index -": the name column and the
+    # description column hold the same word. The repeat is silence, not prose,
+    # and the row has to come out empty - that is what tells the ladder the
+    # token is a literal keyword rather than a value it had to guess at.
+    assert parameter_rows(["Parameter Description", "arp ARP-"], ["show hwroute hardware arp"]) == {
+        "arp": ""
+    }
+
+
+def test_a_repeat_with_something_after_it_is_a_real_word() -> None:
+    # The other half of the same rule. "password Password in string form"
+    # describes a password; taking the noun as well left "in string form".
+    lines = ["Parameter Description Values", "password Password in string form"]
+
+    assert parameter_rows(lines, ["enable password { cipher | plain } password"]) == {
+        "password": "Password in string form"
+    }
