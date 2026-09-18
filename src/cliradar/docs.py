@@ -18,6 +18,15 @@ from .docparse.profile import Profile, available
 from .models import CommandEntry
 
 SUPPORTED_SUFFIXES = {".md", ".txt", ".rst", ".docx"}
+# Suffixes that say "this is a manual" while this reader cannot read them. A
+# file dropped by the filter below never enters the loop, so it never reaches
+# _Skipped either: a folder holding four PDFs drew not one word about them, and
+# the command count came out looking like the whole folder had been read - the
+# same silence defect 1 was about. Only document-shaped files are named; saying
+# it for every .png beside a manual would drown the refusals that matter.
+UNREADABLE_DOCUMENT_SUFFIXES = {
+    ".pdf", ".doc", ".odt", ".rtf", ".djvu", ".epub", ".chm", ".fb2", ".pages",
+}
 MAX_DOCUMENT_BYTES = 5 * 1024 * 1024
 # A .docx is a zip, so its size on disk says little about the work reading it
 # costs: the manual this reader was written for is 5 MB packed and 113 MB of
@@ -500,17 +509,30 @@ def scan_documentation(
     spoken: dict[str, str] = {}
 
     candidates = [root] if root.is_file() else root.rglob("*")
-    paths = sorted(
-        item
-        for item in candidates
-        if item.is_file()
-        and not item.is_symlink()
-        and item.suffix.lower() in SUPPORTED_SUFFIXES
-        and (
-            item.suffix.lower() == ".docx"
-            or item.stat().st_size <= MAX_DOCUMENT_BYTES
-        )
-    )
+    paths = []
+    for item in sorted(candidates):
+        if not item.is_file() or item.is_symlink():
+            continue
+        suffix = item.suffix.lower()
+        if suffix not in SUPPORTED_SUFFIXES:
+            if suffix in UNREADABLE_DOCUMENT_SUFFIXES:
+                _refuse(skipped, item, f"формат {suffix} этот читатель пока не разбирает")
+            continue
+        # A .docx is a zip and is measured unpacked, further down.
+        if suffix != ".docx":
+            try:
+                size = item.stat().st_size
+            except OSError:
+                _refuse(skipped, item, "файл не читается")
+                continue
+            if size > MAX_DOCUMENT_BYTES:
+                _refuse(
+                    skipped,
+                    item,
+                    f"{size} Б превышает предел {MAX_DOCUMENT_BYTES} Б",
+                )
+                continue
+        paths.append(item)
     total = len(paths)
     for index, path in enumerate(paths):
         # Reading a folder of manuals is otherwise silent; a per-file tick lets

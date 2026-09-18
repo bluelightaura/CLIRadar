@@ -291,6 +291,46 @@ def test_reports_a_manual_that_yielded_nothing(tmp_path: Path) -> None:
     assert "архив" in skipped[0][1]
 
 
+def test_names_a_document_whose_format_it_cannot_read(tmp_path: Path) -> None:
+    # A .pdf never reached the reading loop, so it never reached the refusals
+    # either: a folder of five PDFs beside one manual reported nothing about
+    # them and the command count read as the whole folder. Defect 8.
+    (tmp_path / "readable.md").write_text("```\nshow version\n```\n", encoding="utf-8")
+    (tmp_path / "manual.pdf").write_bytes(b"%PDF-1.7 whatever")
+    skipped: list[tuple[Path, str]] = []
+
+    commands = scan_documentation(tmp_path, on_skip=lambda p, why: skipped.append((p, why)))
+
+    assert set(commands) == {"show version"}
+    assert [p.name for p, _ in skipped] == ["manual.pdf"]
+    assert ".pdf" in skipped[0][1]
+
+
+def test_says_nothing_about_a_file_that_was_never_a_document(tmp_path: Path) -> None:
+    # Only document-shaped files are named. A screenshot beside a manual is not
+    # a refusal, and saying so for every one of them buries the ones that are.
+    (tmp_path / "readable.md").write_text("```\nshow version\n```\n", encoding="utf-8")
+    (tmp_path / "topology.png").write_bytes(b"\x89PNG\r\n")
+    (tmp_path / "notes.log").write_text("ничего интересного\n", encoding="utf-8")
+    skipped: list[tuple[Path, str]] = []
+
+    scan_documentation(tmp_path, on_skip=lambda p, why: skipped.append((p, why)))
+
+    assert skipped == []
+
+
+def test_names_a_manual_dropped_for_its_size(tmp_path: Path) -> None:
+    # The limit covers everything but .docx, and the reference .md is already
+    # at 83% of it. Crossing it must not be the quiet loss of a whole manual.
+    (tmp_path / "huge.md").write_text("x" * (MAX_DOCUMENT_BYTES + 1), encoding="utf-8")
+    skipped: list[tuple[Path, str]] = []
+
+    scan_documentation(tmp_path, on_skip=lambda p, why: skipped.append((p, why)))
+
+    assert [p.name for p, _ in skipped] == ["huge.md"]
+    assert "превышает предел" in skipped[0][1]
+
+
 def test_reports_a_file_read_without_finding_a_command(tmp_path: Path) -> None:
     (tmp_path / "prose.md").write_text("Просто абзац текста без команд.\n", encoding="utf-8")
     skipped: list[tuple[Path, str]] = []
