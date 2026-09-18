@@ -39,7 +39,7 @@ show ip config
 
 Switch> show ip config
 !ip address configuration
-outband ip address 10.18.12.120/24
+outband ip address 192.0.2.120/24
 !
 !Ip Configuration
 ip arp aging-time 600

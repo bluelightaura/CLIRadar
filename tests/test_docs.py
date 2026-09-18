@@ -398,7 +398,7 @@ def test_a_fence_that_names_another_language_is_not_the_device_cli(tmp_path: Pat
     # missing "pytest" and "export SWITCH_PASSWORD='...'".
     (tmp_path / "readme.md").write_text(
         "```bash\npytest\nexport SWITCH_PASSWORD='...'\n```\n"
-        "```yaml\ndevice:\n  host: 10.0.0.1\n```\n"
+        "```yaml\ndevice:\n  host: 192.0.2.1\n```\n"
         "```text\nshow version\n```\n",
         encoding="utf-8",
     )
@@ -407,11 +407,11 @@ def test_a_fence_that_names_another_language_is_not_the_device_cli(tmp_path: Pat
 
 
 def test_a_line_with_an_arrow_is_a_diagram_not_a_command(tmp_path: Path) -> None:
-    # "ping 172.16.1.101 -> 3 packets transmitted, 3 received" is output a
+    # "ping 192.0.2.101 -> 3 packets transmitted, 3 received" is output a
     # document quoted, and it carried a lab address into the catalog with it.
     (tmp_path / "notes.md").write_text(
         "```\n"
-        "ping 172.16.1.101 -> 3 packets transmitted, 3 received\n"
+        "ping 192.0.2.101 -> 3 packets transmitted, 3 received\n"
         "raw help -> parse_context_help() -> Catalog\n"
         "show version\n"
         "```\n",

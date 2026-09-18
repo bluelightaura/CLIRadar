@@ -125,7 +125,7 @@ IGNORED_PREFIXES = ("sudo ", "ssh ", "telnet ")
 # An arrow says the line is showing something turning into something else - a
 # pipeline in a diagram, a before-and-after, the output a ping printed. None of
 # them is a command an operator types, and read as one they arrive in the
-# catalog whole: "ping 172.16.1.101 -> 3 packets transmitted, 3 received".
+# catalog whole: "ping 192.0.2.101 -> 3 packets transmitted, 3 received".
 ARROW_RE = re.compile(r"(?:->|=>|\u2192|\u21d2)")
 
 

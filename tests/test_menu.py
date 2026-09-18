@@ -65,8 +65,8 @@ def test_disp_width_ignores_escapes_and_counts_wide_chars() -> None:
 
 def test_target_line_reads_user_and_host(tmp_path: Path) -> None:
     cfg = tmp_path / "c.yml"
-    cfg.write_text(yaml.safe_dump({"device": {"host": "10.0.0.1", "username": "op"}}))
-    assert _target_line(cfg) == "op@10.0.0.1"
+    cfg.write_text(yaml.safe_dump({"device": {"host": "192.0.2.1", "username": "op"}}))
+    assert _target_line(cfg) == "op@192.0.2.1"
 
 
 def test_target_line_is_neutral_when_missing_or_broken(tmp_path: Path) -> None:
@@ -187,9 +187,9 @@ def test_target_meta_is_none_without_a_device(tmp_path: Path) -> None:
 
 def test_target_label_formats_user_host_transport(tmp_path: Path) -> None:
     cfg = _write_cfg(
-        tmp_path / "c.yml", {"host": "10.0.0.1", "username": "op", "port": 22}
+        tmp_path / "c.yml", {"host": "192.0.2.1", "username": "op", "port": 22}
     )
-    assert _target_label(cfg) == "op@10.0.0.1  ssh:22"
+    assert _target_label(cfg) == "op@192.0.2.1  ssh:22"
 
 
 def test_discover_targets_lists_only_device_configs(tmp_path: Path) -> None:
@@ -223,10 +223,10 @@ def test_prompt_return_leaves_on_interrupt(monkeypatch) -> None:
 
 def test_render_picker_lists_targets_and_manual_row(tmp_path: Path, monkeypatch) -> None:
     _no_color(monkeypatch)
-    cfg = _write_cfg(tmp_path / "a.yml", {"host": "10.0.0.1", "username": "op"})
+    cfg = _write_cfg(tmp_path / "a.yml", {"host": "192.0.2.1", "username": "op"})
     targets = _discover_targets(cfg, base=tmp_path)
     frame = _render_picker(targets, cfg, cursor=0, version="1.0")
-    assert "op@10.0.0.1  ssh:22" in frame
+    assert "op@192.0.2.1  ssh:22" in frame
     assert "a.yml" in frame
     assert "Enter a path" in frame
     # The cursor marks exactly one row.
@@ -357,7 +357,7 @@ def test_render_map_shows_badges_and_stays_aligned(tmp_path: Path, monkeypatch) 
 def test_catalog_and_transport_reads_output_and_transport(tmp_path: Path) -> None:
     cfg = tmp_path / "dev.yml"
     cfg.write_text(yaml.safe_dump({
-        "device": {"host": "10.0.0.1", "transport": "telnet"},
+        "device": {"host": "192.0.2.1", "transport": "telnet"},
         "output": {"device_catalog": "output/custom_real.yml"},
     }))
     catalog, transport = _catalog_and_transport(cfg)
@@ -446,7 +446,7 @@ def test_gated_runs_are_locked_until_connected(monkeypatch) -> None:
     assert "set up the device first" in audit_row
 
     unlocked = _render(
-        Path("c.yml"), "1.0", cursor=0, connected=True, connected_to="op@10.0.0.1"
+        Path("c.yml"), "1.0", cursor=0, connected=True, connected_to="op@192.0.2.1"
     )
     audit_row = next(l for l in unlocked.splitlines() if "Audit device" in l)
     assert "⊘" not in audit_row
@@ -469,11 +469,11 @@ def test_only_audit_and_compare_are_gated() -> None:
 
 def test_render_setup_lists_fields_and_stays_aligned(monkeypatch, tmp_path) -> None:
     _no_color(monkeypatch)
-    fields = {"host": "10.0.0.1", "port": 22, "username": "op",
+    fields = {"host": "192.0.2.1", "port": 22, "username": "op",
               "transport": "ssh", "password_env": "SWITCH_PASSWORD"}
     frame = _render_setup(tmp_path / "c.yml", fields, cursor=0,
                           message="", message_role="dim")
-    assert "Host" in frame and "10.0.0.1" in frame
+    assert "Host" in frame and "192.0.2.1" in frame
     assert "Save & test connection" in frame
     assert len({_disp_width(line) for line in frame.splitlines()}) == 1
 
@@ -517,12 +517,12 @@ def test_ensure_host_key_accepts_and_pins_on_y(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(menu, "_read_key", lambda: "y")
     cfg = tmp_path / "config.yml"
     cfg.write_text("")
-    fields = {"host": "10.0.0.1", "port": 22, "username": "op",
+    fields = {"host": "192.0.2.1", "port": 22, "username": "op",
               "transport": "ssh", "password_env": "SWITCH_PASSWORD"}
-    ok, note = menu._ensure_host_key(cfg, fields, "10.0.0.1", 22)
+    ok, note = menu._ensure_host_key(cfg, fields, "192.0.2.1", 22)
     assert ok is True and note == ""
     known = tmp_path / "known_hosts"
-    assert "10.0.0.1 ssh-ed25519 AAAAfake" in known.read_text()
+    assert "192.0.2.1 ssh-ed25519 AAAAfake" in known.read_text()
     # The config now records where the pinned key lives.
     data = yaml.safe_load(cfg.read_text())
     assert data["device"]["known_hosts"] == str(known)
@@ -534,7 +534,7 @@ def test_ensure_host_key_rejects_on_anything_else(tmp_path, monkeypatch) -> None
     monkeypatch.setattr(menu, "_read_key", lambda: "n")
     cfg = tmp_path / "config.yml"
     cfg.write_text("")
-    ok, _note = menu._ensure_host_key(cfg, {}, "10.0.0.1", 22)
+    ok, _note = menu._ensure_host_key(cfg, {}, "192.0.2.1", 22)
     assert ok is False
     assert not (tmp_path / "known_hosts").exists()  # nothing was written
 
@@ -545,7 +545,7 @@ def test_ensure_host_key_skips_the_question_when_already_pinned(
     from cliradar.devicecfg import pin_host_key
 
     known = tmp_path / "known_hosts"
-    pin_host_key(known, "10.0.0.1", 22, _FAKE_KEY)
+    pin_host_key(known, "192.0.2.1", 22, _FAKE_KEY)
     monkeypatch.setattr(
         menu, "fetch_host_key",
         lambda h, p: (_ for _ in ()).throw(AssertionError("must not fetch")),
@@ -553,7 +553,7 @@ def test_ensure_host_key_skips_the_question_when_already_pinned(
     cfg = tmp_path / "config.yml"
     cfg.write_text("")
     fields = {"known_hosts": str(known)}
-    ok, _note = menu._ensure_host_key(cfg, fields, "10.0.0.1", 22)
+    ok, _note = menu._ensure_host_key(cfg, fields, "192.0.2.1", 22)
     assert ok is True
 
 
@@ -561,7 +561,7 @@ def test_ensure_host_key_reports_fetch_failure(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(menu, "fetch_host_key", lambda h, p: (None, "timed out"))
     cfg = tmp_path / "config.yml"
     cfg.write_text("")
-    ok, note = menu._ensure_host_key(cfg, {}, "10.0.0.1", 22)
+    ok, note = menu._ensure_host_key(cfg, {}, "192.0.2.1", 22)
     assert ok is False
     assert "timed out" in note
 
@@ -714,7 +714,7 @@ def test_setup_screen_shows_a_failed_save_instead_of_exiting(
     _quiet_screen(monkeypatch)
     monkeypatch.setattr(
         menu, "load_device_fields",
-        lambda path: {"host": "10.0.0.1", "username": "op",
+        lambda path: {"host": "192.0.2.1", "username": "op",
                       "transport": "ssh", "port": 22},
     )
 
@@ -745,7 +745,7 @@ def test_setup_screen_shows_a_failed_save_instead_of_exiting(
 def test_render_setup_trims_a_long_message_to_the_panel(monkeypatch) -> None:
     _no_color(monkeypatch)
     frame = _render_setup(
-        Path("c.yml"), {"host": "10.0.0.1"}, 0, "E" * 200, "bad"
+        Path("c.yml"), {"host": "192.0.2.1"}, 0, "E" * 200, "bad"
     )
     widths = {menu._disp_width(line) for line in frame.splitlines()}
     assert len(widths) == 1  # every row, border included, is the same width
@@ -775,10 +775,10 @@ def test_theme_and_language_survive_a_restart(monkeypatch) -> None:
 
 def test_remembered_target_only_fills_a_missing_path(tmp_path, monkeypatch) -> None:
     _fresh_prefs(monkeypatch)
-    saved = _write_cfg(tmp_path / "saved.yml", {"host": "10.0.0.9"})
+    saved = _write_cfg(tmp_path / "saved.yml", {"host": "192.0.2.9"})
     menu._remember_target(saved)
     # A path that exists wins over the memory ...
-    here = _write_cfg(tmp_path / "here.yml", {"host": "10.0.0.1"})
+    here = _write_cfg(tmp_path / "here.yml", {"host": "192.0.2.1"})
     assert menu._remembered_target(here) == here
     # ... and the memory fills in for one that does not.
     assert menu._remembered_target(tmp_path / "gone.yml") == saved.resolve()
@@ -947,10 +947,10 @@ def test_load_rejected_verbs_survives_a_broken_catalog(tmp_path: Path) -> None:
 
 def test_run_banner_states_the_run_and_the_way_out(tmp_path, monkeypatch) -> None:
     _no_color(monkeypatch)
-    cfg = _write_cfg(tmp_path / "sw.yml", {"host": "10.0.0.1", "username": "op"})
+    cfg = _write_cfg(tmp_path / "sw.yml", {"host": "192.0.2.1", "username": "op"})
     banner = menu.run_banner(cfg, "audit")
     assert "Audit device" in banner
-    assert "10.0.0.1" in banner
+    assert "192.0.2.1" in banner
     assert "Ctrl-C" in banner  # the run is cancellable and says so
     assert len({_disp_width(line) for line in banner.splitlines()}) == 1
 

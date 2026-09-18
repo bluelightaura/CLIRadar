@@ -62,13 +62,13 @@ name       VPN                         Строковый формат
 **Пример использования**
 
 ```text
-     Пользователь вошел на сервер по адресу 192.168.1.200, используя имя
+     Пользователь вошел на сервер по адресу 192.0.2.200, используя имя
 пользователя 123 и пароль 123. Затем он загрузил файл с именем Switch.bin
 
 с этого FTP-сервера и сохранил его локально, переименовав в v2.4.bin.
 
-        Switch(config)#ftp get 192.168.1.200 123 123 Switch.bin v2.4.bin
-        Getting File “Switch.bin” from 192.168.1.200...
+        Switch(config)#ftp get 192.0.2.200 123 123 Switch.bin v2.4.bin
+        Getting File “Switch.bin” from 192.0.2.200...
         1528618 bytes downloaded.
         If you want to upgrade system,use “upgrade” command!
         Switch(config)#
