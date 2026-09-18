@@ -21,3 +21,5 @@ cliradar_check/
 known_hosts
 # Автожурнал состояния сессии; локальный, не коммитится.
 CHECKPOINT.md
+# LibreOffice lock files: they hold the login, the host name and a home path.
+.~lock.*#
