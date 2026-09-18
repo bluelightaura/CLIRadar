@@ -346,3 +346,63 @@ def test_prose_the_manual_set_in_title_case_is_not_a_form() -> None:
     # letter alone would make it a form of it.
     block = ["Show IGMP-Snooping Statistic Interface Eth-Trunk Trunk-Number"]
     assert docx._forms(block, "show igmp-snooping statistic") == []
+
+
+def test_a_title_the_column_broke_inside_a_word_is_still_a_title(profile) -> None:
+    """Copied from the card for "show ipv6 statistic", in the order it arrives.
+
+    "Command format" was set across a column edge that fell inside the word,
+    and the tail of it reached the stream ahead of the head. Unnamed, the block
+    stayed prose: the card shipped with no syntax at all and its description
+    carried the scrambled title and all four forms.
+    """
+    source = [
+        "4.2.17 show ipv6 statistic",
+        "Command Function",
+        "The show ipv6 statistic command can be used to display IPv6 related statistics.",
+        "nd format",
+        "Comma",
+        "show ipv6 statistic",
+        "show ipv6 statistic interface vlan vlan-id",
+        "Parameter Description",
+        "Parameter Description Values",
+        "vlan-id specifies the VLAN ID integer value, with a range of 1 to 4094.",
+    ]
+
+    card = split_cards(docx.as_card_text(source, profile), profile)[0]
+
+    assert set(card.parameters) == {"vlan-id"}
+    assert card.syntax == [
+        "show ipv6 statistic",
+        "show ipv6 statistic interface vlan vlan-id",
+    ]
+    assert card.purpose == [
+        "The show ipv6 statistic command can be used to display IPv6 related statistics."
+    ]
+
+
+def test_two_cells_of_a_table_header_are_not_a_title_run_together(profile) -> None:
+    """The other side of that rule, and what it cost before it was narrowed.
+
+    On the untranslated cards the table header's cells stand in the document
+    back to front, and the block this manual calls 参数说明 is written without
+    a space - so the two cells run together into the title exactly. Taken as
+    one, the header went and the card lost its whole table; the seam has to
+    fall inside a word of the title for the repair to apply, and a title with
+    no words to break offers no such seam.
+    """
+    source = [
+        "8.8.20 reset server statistic",
+        "命令形式",
+        "reset server name statistic",
+        "参数说明",
+        "取值",
+        "说明",
+        "参数",
+        "name 指定tacacs 服务器名称 字符串形式",
+    ]
+
+    card = split_cards(docx.as_card_text(source, profile), profile)[0]
+
+    assert card.syntax == ["reset server name statistic"]
+    assert set(card.parameters) == {"name"}

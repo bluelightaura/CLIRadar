@@ -226,6 +226,42 @@ def _title_at(source: list[str], index: int, titles: dict[str, str]) -> tuple[st
         joined = " ".join(source[index : index + span]).casefold()
         if joined in titles:
             return titles[joined], span
+    return _broken_inside_a_word(source, index, titles)
+
+
+def _broken_inside_a_word(source: list[str], index: int, titles: dict[str, str]) -> tuple[str, int]:
+    """A title the column broke mid-word and the merge handed over back to front.
+
+    One card of this manual prints "Command format" as the two lines "nd
+    format" and "Comma", in that order: the column edge fell inside the word,
+    and the tail of it reached the stream before the head. Joined the way a
+    title that merely wrapped is joined, that spells nothing, so the block went
+    unnamed and the card shipped without its syntax.
+
+    The halves are put back without a space between them, because the break is
+    inside a word rather than between two, and the second is tried in front of
+    the first, because that is the order the document hands them over.
+
+    Two conditions keep that from becoming a rule about any two lines that run
+    together into a name, and both were put there by a measurement rather than
+    by caution. The seam must fall inside a word of the title, since a title
+    broken between its words arrives in reading order and the plain join above
+    already has it. And the title must be one that has words to break: the
+    block names this manual also prints in Chinese are written without spaces,
+    so every seam is inside a word there, and the rule ate the header of a
+    parameter table - the cells "\u53c2\u6570" and "\u8bf4\u660e" stand in the document back to
+    front and run together into the block name "\u53c2\u6570\u8bf4\u660e" exactly. One card
+    lost its table to that before the condition was added.
+    """
+    if index + 2 > len(source):
+        return "", 0
+    head, tail = source[index], source[index + 1]
+    joined = tail + head
+    seam = len(tail)
+    if " " not in joined or not seam or joined[seam - 1] == " " or joined[seam] == " ":
+        return "", 0
+    if joined.casefold() in titles:
+        return titles[joined.casefold()], 2
     return "", 0
 
 
