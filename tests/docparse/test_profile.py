@@ -81,7 +81,7 @@ def test_an_ip_address_is_not_a_section_number() -> None:
     for address in (
         "255.255.255.255 telnet",
         "0.0.0.0 normal",
-        "10.1.1.6 vlan 101 NON-DR 81",
+        "192.0.2.6 vlan 101 NON-DR 81",
         "255.255.255.0 precedence 2 fragment",
     ):
         assert not heading.match(address), address

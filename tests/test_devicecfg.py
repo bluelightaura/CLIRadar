@@ -28,11 +28,11 @@ def test_load_defaults_when_file_is_missing(tmp_path: Path) -> None:
 def test_load_reads_existing_device_section(tmp_path: Path) -> None:
     cfg = tmp_path / "config.yml"
     cfg.write_text(yaml.safe_dump({
-        "device": {"host": "10.0.0.1", "port": 23, "username": "op",
+        "device": {"host": "192.0.2.1", "port": 23, "username": "op",
                    "transport": "telnet"},
     }))
     fields = load_device_fields(cfg)
-    assert fields["host"] == "10.0.0.1"
+    assert fields["host"] == "192.0.2.1"
     assert fields["port"] == 23
     assert fields["transport"] == "telnet"
     assert fields["username"] == "op"
@@ -45,11 +45,11 @@ def test_save_preserves_other_sections(tmp_path: Path) -> None:
         "discovery": {"max_depth": 7},
         "output": {"device_catalog": "output/cli_real.yml"},
     }))
-    save_device_fields(cfg, {"host": "10.9.9.9", "username": "admin",
+    save_device_fields(cfg, {"host": "203.0.113.9", "username": "admin",
                              "port": 22, "transport": "ssh",
                              "password_env": "SWITCH_PASSWORD"})
     data = yaml.safe_load(cfg.read_text())
-    assert data["device"]["host"] == "10.9.9.9"
+    assert data["device"]["host"] == "203.0.113.9"
     assert data["device"]["username"] == "admin"
     # Untouched sections survive the write.
     assert data["discovery"]["max_depth"] == 7
@@ -118,36 +118,36 @@ _KEY = {"type": "ecdsa-sha2-nistp256", "base64": "AAAAtest", "fingerprint": "SHA
 
 def test_pin_creates_the_file_and_lookup_finds_it(tmp_path) -> None:
     path = tmp_path / "known_hosts"
-    assert host_key_is_pinned(path, "10.0.0.1", 22) is False
-    pin_host_key(path, "10.0.0.1", 22, _KEY)
-    assert host_key_is_pinned(path, "10.0.0.1", 22) is True
-    assert path.read_text() == "10.0.0.1 ecdsa-sha2-nistp256 AAAAtest\n"
+    assert host_key_is_pinned(path, "192.0.2.1", 22) is False
+    pin_host_key(path, "192.0.2.1", 22, _KEY)
+    assert host_key_is_pinned(path, "192.0.2.1", 22) is True
+    assert path.read_text() == "192.0.2.1 ecdsa-sha2-nistp256 AAAAtest\n"
 
 
 def test_pin_uses_bracketed_form_for_odd_ports(tmp_path) -> None:
     path = tmp_path / "known_hosts"
-    pin_host_key(path, "10.0.0.1", 2004, _KEY)
-    assert "[10.0.0.1]:2004 " in path.read_text()
-    assert host_key_is_pinned(path, "10.0.0.1", 2004) is True
-    assert host_key_is_pinned(path, "10.0.0.1", 22) is False  # a different target
+    pin_host_key(path, "192.0.2.1", 2004, _KEY)
+    assert "[192.0.2.1]:2004 " in path.read_text()
+    assert host_key_is_pinned(path, "192.0.2.1", 2004) is True
+    assert host_key_is_pinned(path, "192.0.2.1", 22) is False  # a different target
 
 
 def test_repinning_replaces_the_old_key_not_duplicates(tmp_path) -> None:
     path = tmp_path / "known_hosts"
-    pin_host_key(path, "10.0.0.1", 22, _KEY)
+    pin_host_key(path, "192.0.2.1", 22, _KEY)
     fresh = dict(_KEY, base64="AAAAnew")  # the device was reinstalled
-    pin_host_key(path, "10.0.0.1", 22, fresh)
+    pin_host_key(path, "192.0.2.1", 22, fresh)
     text = path.read_text()
-    assert text.count("10.0.0.1") == 1
+    assert text.count("192.0.2.1") == 1
     assert "AAAAnew" in text and "AAAAtest" not in text
 
 
 def test_pin_keeps_other_hosts_entries(tmp_path) -> None:
     path = tmp_path / "known_hosts"
-    pin_host_key(path, "10.0.0.1", 22, _KEY)
-    pin_host_key(path, "10.0.0.2", 22, _KEY)
+    pin_host_key(path, "192.0.2.1", 22, _KEY)
+    pin_host_key(path, "192.0.2.2", 22, _KEY)
     text = path.read_text()
-    assert "10.0.0.1 " in text and "10.0.0.2 " in text
+    assert "192.0.2.1 " in text and "192.0.2.2 " in text
 
 
 def test_save_persists_known_hosts_path(tmp_path) -> None:

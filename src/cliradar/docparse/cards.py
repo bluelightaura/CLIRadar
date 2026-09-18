@@ -6,7 +6,7 @@ parameter table, a command mode, a worked example. Read line by line, such a
 document poisons the catalog. The parameter table's first column arrives as a
 thousand one-word "commands" (acl-name, acct-port, and the hyphenated
 wreck accounting-), the worked examples arrive as commands carrying somebody
-else's addresses (neighbor 10.18.2.111 next-hop-local), and the prose
+else's addresses (neighbor 192.0.2.111 next-hop-local), and the prose
 bullets arrive with the word-wrap damage the conversion left in them
 (interfacenumber for interface-number).
 
