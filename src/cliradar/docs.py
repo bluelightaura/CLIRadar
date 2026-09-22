@@ -309,9 +309,69 @@ def _split_alternatives(value: str) -> list[str]:
     return [part for part in parts if part]
 
 
+def _fold_bare_alternatives(tokens: list[str]) -> list[str]:
+    """A run of "A | B | C" written without braces, folded into the group it is.
+
+    The manual mostly braces its alternatives, and where it does not the bar
+    alone carries the whole meaning: "enable password cipher | plain
+    <password>" offers two spellings of one word. Left as three tokens the bar
+    stands in the catalog as if it were typed, and the ten commands this
+    produced - "color gray | red | green | ...", "remote upgrade enable |
+    disable" - are commands no device will accept.
+
+    The bar joins its immediate neighbours and nothing further, which is the
+    same reading the marking layer already takes (see ``_is_bare_alternative``)
+    and the only one the documents support: "upgrade os | config | fpga system
+    all | self" is two choices with a keyword between them, not one choice of
+    six. A bar with a neighbour missing is left alone - there is nothing to
+    join it to, and inventing a group there would be inventing syntax.
+
+    And nothing is folded at all unless every bar in the line stands on its
+    own. A line where one bar is welded to its word - "view configure |
+    bgp|bgp-af-ipv4 |bgp-af-ipv4mcast ... bgp-afipv4- mcast" - is a line the
+    conversion damaged, and its alternation can no longer be read by counting
+    off "word, bar, word": the run breaks at the first weld and the rest of the
+    fifty view names stand as if they were words of the command. Measured, that
+    turned a card which had been contributing nothing into 708 commands no
+    device has, across it and its "no" mirror. Losing a damaged card costs one
+    card; inventing commands costs every report that compares against it.
+    """
+    if any(token != "|" and "|" in token for token in tokens):  # nosec B105 - grammar
+        return tokens
+    folded: list[str] = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token != "|" or not folded or index + 1 >= len(tokens):  # nosec B105 - grammar
+            folded.append(token)
+            index += 1
+            continue
+        run = [folded.pop(), tokens[index + 1]]
+        index += 2
+        while index + 1 < len(tokens) and tokens[index] == "|":  # nosec B105 - grammar
+            run.append(tokens[index + 1])
+            index += 2
+        folded.append("{" + "|".join(run) + "}")
+    return folded
+
+
+def _continues_the_word_before(token: str) -> bool:
+    """Is this group a tail of the previous token rather than a word of its own?
+
+    A subinterface is written "interface-number[.subinterface]", and the manual
+    sets a space before the bracket. Expanded as a word in its own right it
+    reaches the catalog as "100gigaethernet <1-4094> .subinterface", which is
+    not what anyone types - the device wants "100gigaethernet 1/0/1.100". The
+    dot is what says so: a group opening with one continues the token before
+    it. Seven lines of the Russian manual are written this way and 226 commands
+    came out of them broken; the Centec manual has none.
+    """
+    return len(token) > 1 and token[0] in "{[" and token[1] == "."
+
+
 def _expand_expression(value: str, cap: int = MAX_EXPANSIONS) -> list[list[str]]:
     paths: list[list[str]] = [[]]
-    for token in _grammar_tokens(value):
+    for token in _fold_bare_alternatives(_grammar_tokens(value)):
         variants: list[list[str]]
         if token.startswith("{") and token.endswith("}"):
             alternatives = _split_alternatives(token[1:-1])
@@ -332,7 +392,14 @@ def _expand_expression(value: str, cap: int = MAX_EXPANSIONS) -> list[list[str]]
         else:
             variants = [[token]]
 
-        expanded = [prefix + variant for prefix in paths for variant in variants]
+        if _continues_the_word_before(token) and all(paths):
+            expanded = [
+                prefix[:-1] + [prefix[-1] + " ".join(variant)]
+                for prefix in paths
+                for variant in variants
+            ]
+        else:
+            expanded = [prefix + variant for prefix in paths for variant in variants]
         if len(expanded) > cap:
             return [_grammar_tokens(value)]
         paths = expanded

@@ -440,3 +440,87 @@ def test_a_table_is_read_as_commands_only_when_it_says_it_holds_them(tmp_path: P
 
     assert set(commands) == {"show version"}
     assert commands["show version"].description == "Displays the version"
+
+
+def test_an_alternative_written_without_braces_is_still_a_choice(tmp_path: Path) -> None:
+    # The manual mostly braces its alternatives; where it does not, the bar
+    # alone carries the meaning. Left unfolded it stood in the catalog as if it
+    # were typed - "color gray | red | green | ..." and nine others, none of
+    # them a command any device accepts.
+    (tmp_path / "reference.txt").write_text(
+        """
+Command Format
+remote upgrade enable | disable
+Parameter Description
+None
+
+Command Format
+upgrade os | config system all | self
+Parameter Description
+None
+""",
+        encoding="utf-8",
+    )
+
+    commands = scan_documentation(tmp_path)
+
+    # The bar joins its neighbours and nothing further: two choices with a
+    # keyword standing between them, not one choice of five.
+    assert set(commands) == {
+        "remote upgrade enable",
+        "remote upgrade disable",
+        "upgrade os system all",
+        "upgrade os system self",
+        "upgrade config system all",
+        "upgrade config system self",
+    }
+
+
+def test_a_line_whose_bars_are_welded_is_left_alone(tmp_path: Path) -> None:
+    """Copied from the card this rule was measured against.
+
+    The conversion welded some bars to their words and broke others apart, so
+    the alternation can no longer be read by counting off "word, bar, word":
+    the run ends at the first weld and the remaining view names stand as if
+    they were words of the command. Folding it anyway turned a card that had
+    been contributing nothing into 708 commands no device has, counting its
+    "no" mirror. Losing a damaged card costs one card.
+    """
+    (tmp_path / "reference.txt").write_text(
+        """
+Command Format
+set view configure | bgp|bgp-af-ipv4 | aaa COMMAND
+Parameter Description
+COMMAND specifies a command string.
+""",
+        encoding="utf-8",
+    )
+
+    commands = scan_documentation(tmp_path)
+
+    # Two view names standing side by side is the invention this refuses.
+    assert not any("bgp aaa" in command for command in commands)
+    assert not any("configure bgp" in command for command in commands)
+
+
+def test_a_group_opening_with_a_dot_continues_the_word_before_it(tmp_path: Path) -> None:
+    # The manual sets a space before the bracket - "interface-number
+    # [.subinterface]" - and expanded as a word of its own the dot reached the
+    # catalog detached: "100gigaethernet <1-4094> .subinterface", where the
+    # device wants "100gigaethernet 1/0/1.100". 226 commands came out this way.
+    (tmp_path / "reference.txt").write_text(
+        """
+Command Format
+show l3int ethernet interface-number [.subinterface]
+Parameter Description
+interface-number specifies the interface number.
+""",
+        encoding="utf-8",
+    )
+
+    commands = scan_documentation(tmp_path)
+
+    assert set(commands) == {
+        "show l3int ethernet interface-number",
+        "show l3int ethernet interface-number.subinterface",
+    }
