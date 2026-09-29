@@ -5,6 +5,10 @@
 config.yml
 config.*.yml
 !config.example.yml
+# Backup copies of the config: same host, login and paths as config.yml.
+*.bak
+*.orig
+*.rej
 *.log
 __pycache__/
 .pytest_cache/
